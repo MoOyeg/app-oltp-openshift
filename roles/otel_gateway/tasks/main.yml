@@ -1,0 +1,33 @@
+---
+- name: RBAC for the k8sattributes processor
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'rbac.yaml.j2') }}"
+
+- name: Deploy the Deployment-mode gateway collector (design.md sec 3.3)
+  kubernetes.core.k8s:
+    state: present
+    # Client-side apply so removed config keys are pruned from the CR
+    # (a default merge patch would leave stale keys behind).
+    apply: true
+    definition: "{{ lookup('template', 'collector.yaml.j2') }}"
+
+- name: Wait for the gateway collector Deployment to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ observability_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/component=opentelemetry-collector"
+      - "app.kubernetes.io/instance={{ observability_namespace }}.{{ otel_gateway_name }}"
+  register: _gw
+  retries: 30
+  delay: 10
+  until: >
+    _gw.resources | length > 0 and
+    (_gw.resources[0].status.availableReplicas | default(0)) | int >= 1
+
+- name: ServiceMonitor so UWM scrapes the collector's OTel metrics endpoint
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'servicemonitor.yaml.j2') }}"

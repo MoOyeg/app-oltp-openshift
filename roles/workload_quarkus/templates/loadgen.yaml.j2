@@ -1,0 +1,38 @@
+---
+# Drives the Quarkus DB-backed endpoints + a deliberate error so the trace
+# tree (REST -> JDBC) and tail_sampling keep-errors policy are exercised.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ quarkus_app_name }}-loadgen
+  namespace: {{ quarkus_namespace }}
+  labels:
+    app: {{ quarkus_app_name }}-loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ quarkus_app_name }}-loadgen
+  template:
+    metadata:
+      labels:
+        app: {{ quarkus_app_name }}-loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: {{ loadgen_image }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              b="http://{{ quarkus_app_name }}.{{ quarkus_namespace }}.svc:8080"
+              while true; do
+                curl -s -o /dev/null "$b/api/products"        || true
+                curl -s -o /dev/null "$b/api/price/WIDGET-1"   || true
+                curl -s -o /dev/null "$b/api/price/GADGET-2"   || true
+                curl -s -o /dev/null "$b/api/boom"             || true
+                sleep {{ loadgen_interval_s }}
+              done
+          resources:
+            limits: { cpu: 50m, memory: 64Mi }
+            requests: { cpu: 10m, memory: 32Mi }

@@ -1,0 +1,77 @@
+---
+# Create an htpasswd IdP with the two scoped Dev users, then bind each to
+# only their namespace. Tenant-trace read is bound in the tempo role.
+
+- name: Generate apr1 password hashes
+  ansible.builtin.command:
+    cmd: "openssl passwd -apr1 {{ item.password }}"
+  loop: "{{ users }}"
+  loop_control: { label: "{{ item.name }}" }
+  register: _hashes
+  changed_when: false
+  no_log: true
+
+- name: Assemble htpasswd file content
+  ansible.builtin.set_fact:
+    _htpasswd: |-
+      {% for r in _hashes.results %}
+      {{ r.item.name }}:{{ r.stdout }}
+      {% endfor %}
+  no_log: true
+
+- name: Create/update the htpasswd secret in openshift-config
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ users_idp_name }}-secret"
+        namespace: openshift-config
+      type: Opaque
+      stringData:
+        htpasswd: "{{ _htpasswd }}"
+  no_log: true
+
+- name: Read the current cluster OAuth
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: OAuth
+    name: cluster
+  register: _oauth
+
+- name: Compute identityProviders (keep others, replace ours by name)
+  ansible.builtin.set_fact:
+    _idps: >-
+      {{ (_oauth.resources[0].spec.identityProviders | default([]))
+         | rejectattr('name', 'equalto', users_idp_name) | list
+         + [ {
+               'name': users_idp_name,
+               'mappingMethod': 'claim',
+               'type': 'HTPasswd',
+               'htpasswd': { 'fileData': { 'name': users_idp_name + '-secret' } }
+             } ] }}
+
+- name: Patch cluster OAuth with the htpasswd IdP
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: config.openshift.io/v1
+      kind: OAuth
+      metadata:
+        name: cluster
+      spec:
+        identityProviders: "{{ _idps }}"
+
+- name: Bind each user to only their namespace (edit + monitoring-edit)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'rolebindings.yaml.j2') }}"
+
+- name: Show the scoped-user access model
+  ansible.builtin.debug:
+    msg: >-
+      IdP '{{ users_idp_name }}' created. Users:
+      {% for u in users %}{{ u.name }} (pw: {{ u.password }}) ->
+      ns {{ u.namespace }} + Tempo tenant only.{{ ' | ' if not loop.last }}{% endfor %}
+      Login at the console; the OAuth rollout takes ~1-2 min.

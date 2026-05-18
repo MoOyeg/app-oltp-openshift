@@ -1,0 +1,3 @@
+---
+# deploy.yml - alias entrypoint for the full build (see site.yml).
+- import_playbook: site.yml

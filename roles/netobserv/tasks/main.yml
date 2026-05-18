@@ -1,0 +1,80 @@
+---
+- name: Install the Network Observability Operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'operator.yaml.j2') }}"
+
+- name: Wait for the NetObserv Subscription to install a CSV
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ netobserv_operators.netobserv.name }}"
+    namespace: "{{ netobserv_operators.netobserv.namespace }}"
+  register: _nsub
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until:
+    - _nsub.resources | length > 0
+    - (_nsub.resources[0].status.installedCSV | default('')) | length > 0
+
+- name: Wait for the NetObserv Operator CSV to Succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ _nsub.resources[0].status.installedCSV }}"
+    namespace: "{{ netobserv_operators.netobserv.namespace }}"
+  register: _ncsv
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until:
+    - _ncsv.resources | length > 0
+    - (_ncsv.resources[0].status.phase | default('')) == 'Succeeded'
+
+- name: Create the cluster-wide FlowCollector (Platform-owned)
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition: "{{ lookup('template', 'flowcollector.yaml.j2') }}"
+
+- name: Wait for FlowCollector to be Ready
+  kubernetes.core.k8s_info:
+    api_version: flows.netobserv.io/v1beta2
+    kind: FlowCollector
+    name: cluster
+  register: _fc
+  retries: 40
+  delay: 15
+  until: >
+    _fc.resources | length > 0 and
+    (_fc.resources[0].status.conditions | default([])
+      | selectattr('type','equalto','Ready')
+      | selectattr('status','equalto','True') | list | length) > 0
+
+- name: Remove the mis-named flow-reader RoleBinding (was netobserv-reader)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    name: "{{ t.reader_user }}-netobserv-reader"
+    namespace: "{{ t.namespace }}"
+  loop: "{{ tempo_tenants }}"
+  loop_control: { loop_var: t, label: "{{ t.namespace }}" }
+
+- name: Per-team FlowCollectorSlice + namespace-scoped flow-reader RBAC
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+  loop: "{{ lookup('template', 'slices-rbac.yaml.j2') | from_yaml_all | list }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }} (ns={{ item.metadata.namespace | default('-') }})"
+  register: _slices
+  failed_when: false   # FlowCollectorSlice / reader ClusterRoles are
+                       # version-dependent; surface, don't hard-fail.
+
+- name: Report any slice/RBAC objects the cluster rejected
+  ansible.builtin.debug:
+    msg: >-
+      {{ _slices.results | selectattr('failed','defined')
+         | selectattr('failed','equalto',true)
+         | map(attribute='item.kind') | list | default([]) }}
+      (empty list = all applied cleanly)

@@ -1,0 +1,9 @@
+---
+# Cluster-scoped operators (OTel, Tempo, COO) use an all-namespaces
+# OperatorGroup (empty spec) in their own install namespace.
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: {{ op.name }}-og
+  namespace: {{ op.namespace }}
+spec: {}

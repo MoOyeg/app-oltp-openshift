@@ -1,0 +1,51 @@
+---
+# design.md sec 3.3: the Instrumentation CR "auto-injects supported SDKs via
+# pod annotation for baseline traces; unsupported language/runtime
+# combinations use manual SDK instrumentation."
+#
+# Here it drives the PYTHON workload (auto-inject). The Quarkus workload uses
+# the quarkus-opentelemetry extension instead (manual SDK) - the Quarkus
+# runtime + Java agent combination is the design's "unsupported combination"
+# case, so the Java agent is intentionally NOT auto-injected.
+#
+# All SDKs export OTLP to the Deployment gateway collector - never directly
+# to Tempo - so tail-sampling and enrichment happen centrally (sec 3.3).
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: {{ instrumentation_name }}
+  namespace: {{ python_namespace }}
+spec:
+  exporter:
+    # OTLP/HTTP into the gateway collector (deployment mode service).
+    endpoint: "http://{{ otel_gateway_name }}-collector.{{ observability_namespace }}.svc:4318"
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    # Head sampler is generous on purpose: the authoritative keep/drop
+    # decision is the gateway's tail_sampling (design.md sec 3.3).
+    type: parentbased_traceidratio
+    argument: "{{ instrumentation_sampler_arg }}"
+  resource:
+    addK8sUIDAttributes: true
+    resourceAttributes:
+      # Canonical join fields (design.md sec 3.3). service.name is derived
+      # by the operator from the workload; we pin the rest explicitly.
+      service.namespace: "{{ python_namespace }}"
+      deployment.environment.name: "{{ otel_environment_name }}"
+  python:
+    env:
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: http/protobuf
+      - name: OTEL_TRACES_EXPORTER
+        value: otlp
+      # design.md sec 3.3: app metrics collected via OpenTelemetry. The
+      # auto-instrumentation emits HTTP/runtime metrics over OTLP to the
+      # gateway collector (no prometheus_client / scrape endpoint).
+      - name: OTEL_METRICS_EXPORTER
+        value: otlp
+      - name: OTEL_METRIC_EXPORT_INTERVAL
+        value: "15000"
+      - name: OTEL_LOGS_EXPORTER
+        value: none

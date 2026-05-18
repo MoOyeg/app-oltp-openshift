@@ -1,0 +1,26 @@
+---
+# UWM scrapes the gateway collector's single Prometheus endpoint (the
+# OTel metrics path, design.md sec 3.2/3.3). One Platform-owned
+# ServiceMonitor replaces the per-app ones - the natural consequence of
+# "collect once, then route deliberately": apps emit OTLP, the collector
+# is the only scrape target. Metrics keep per-app labels (service_name,
+# k8s_namespace_name) via resource_to_telemetry_conversion.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ otel_gateway_name }}-otel-metrics
+  namespace: {{ observability_namespace }}
+  labels:
+    app.kubernetes.io/component: opentelemetry-collector
+spec:
+  namespaceSelector:
+    matchNames: ["{{ observability_namespace }}"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: opentelemetry-collector
+      app.kubernetes.io/instance: "{{ observability_namespace }}.{{ otel_gateway_name }}"
+      app.kubernetes.io/managed-by: opentelemetry-operator
+  endpoints:
+    - port: promexporter
+      path: /metrics
+      interval: 30s

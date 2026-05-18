@@ -1,0 +1,53 @@
+---
+# Pre-refactor builds shipped a per-app ServiceMonitor (Prometheus scrape
+# of /metrics). Metrics now leave via OTLP, so remove the stale one - a
+# template apply does not prune objects dropped from the template.
+- name: Remove the pre-refactor per-app ServiceMonitor
+  kubernetes.core.k8s:
+    state: absent
+    api_version: monitoring.coreos.com/v1
+    kind: ServiceMonitor
+    name: "{{ python_app_name }}"
+    namespace: "{{ python_namespace }}"
+
+- name: Create the Python app source ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'app.yaml.j2') }}"
+
+- name: Deploy the Python workload (auto-injected SDK -> gateway collector)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'deploy.yaml.j2') }}"
+
+- name: Deploy the Python load generator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'loadgen.yaml.j2') }}"
+  when: loadgen_enabled | bool
+
+- name: Wait for the Python workload to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ python_app_name }}"
+    namespace: "{{ python_namespace }}"
+  register: _pdep
+  retries: 30
+  delay: 10
+  until: >
+    _pdep.resources | length > 0 and
+    (_pdep.resources[0].status.availableReplicas | default(0)) | int >= 1
+
+- name: Confirm the OTel auto-instrumentation init container was injected
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ python_namespace }}"
+    label_selectors:
+      - "app={{ python_app_name }}"
+  register: _ppods
+  failed_when: >
+    _ppods.resources | length == 0 or
+    (_ppods.resources[0].spec.initContainers | default([])
+      | selectattr('name','search','opentelemetry') | list | length) == 0

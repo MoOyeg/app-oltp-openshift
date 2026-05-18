@@ -1,0 +1,168 @@
+---
+# design.md sec 3.3 standard topology:
+#   "workload SDKs send OTLP to a Deployment gateway collector for
+#    tail-sampling, enrichment, and export to Tempo."
+#
+# Mode = deployment (NOT daemonset). This is the only trace path.
+# Pipeline = OTLP receivers -> memory_limiter -> k8sattributes (enrich)
+#            -> resource (enrich) -> tail_sampling -> batch -> OTLP -> Tempo.
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: {{ otel_gateway_name }}
+  namespace: {{ observability_namespace }}
+spec:
+  mode: deployment
+  replicas: {{ otel_gateway_replicas }}
+  serviceAccount: {{ otel_gateway_name }}-collector
+  # Expose the prometheus exporter port on the operator-managed Service so
+  # a ServiceMonitor can point UWM at it.
+  ports:
+    - name: promexporter
+      port: {{ otel_gateway_metrics_port }}
+      protocol: TCP
+  resources:
+{{ otel_gateway_resources | to_nice_yaml(indent=2) | indent(4, true) }}
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      # Backpressure guard so the gateway sheds load instead of OOM-killing.
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+
+      # ---- Enrichment (design.md sec 3.3 canonical join fields) ----
+      # k8sattributes resolves the k8s.* attributes from the sender's IP.
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.container.name
+            - k8s.deployment.name
+            - k8s.node.name
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.ip
+          - sources:
+              - from: connection
+
+      # resource stamps the fleet-wide environment dimension. service.name /
+      # service.namespace / service.version come from the SDKs themselves.
+      resource:
+        attributes:
+          - key: deployment.environment.name
+            value: "{{ otel_environment_name }}"
+            action: upsert
+
+      # ---- Tail sampling (design.md sec 3.3 / 4.1) ----
+      # Composite OR: a trace is kept if ANY policy matches. Keep every error
+      # and every slow trace; probabilistically sample the healthy remainder.
+      tail_sampling:
+        decision_wait: {{ otel_tailsampling.decision_wait_s }}s
+        num_traces: {{ otel_tailsampling.num_traces }}
+        expected_new_traces_per_sec: {{ otel_tailsampling.expected_new_traces_per_sec }}
+        policies:
+          - name: keep-errors
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: keep-slow
+            type: latency
+            latency:
+              threshold_ms: {{ otel_tailsampling.slow_latency_ms }}
+          - name: baseline-sample
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: {{ otel_tailsampling.baseline_percent }}
+
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+
+    extensions:
+      # The gateway runs in tenants.mode=openshift, so writes must carry the
+      # collector's ServiceAccount bearer token (auto-mounted). The
+      # tempo-collector-write ClusterRole authorizes it for every tenant.
+      bearertokenauth:
+        filename: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+    connectors:
+      # design.md sec 9: route each app's spans to its OWN Tempo tenant so
+      # per-user RBAC isolates traces per namespace. Keyed on
+      # service.namespace (set deterministically by the SDKs themselves via
+      # OTEL_RESOURCE_ATTRIBUTES / Instrumentation CR) rather than
+      # k8s.namespace.name, whose k8sattributes pod-association can lag and
+      # leak spans into the default tenant.
+      routing:
+        error_mode: ignore
+        default_pipelines: [traces/{{ tempo_tenants[0].name }}]
+        table:
+{% for t in tempo_tenants %}
+          - context: resource
+            condition: attributes["service.namespace"] == "{{ t.namespace }}" or attributes["k8s.namespace.name"] == "{{ t.namespace }}"
+            pipelines: [traces/{{ t.name }}]
+{% endfor %}
+
+    exporters:
+      # design.md sec 3.3 "export to Tempo": OTLP into the multitenant Tempo
+      # GATEWAY (not the distributor). Tenant selected via X-Scope-OrgID.
+      # insecure_skip_verify: the gateway serves a service-CA TLS cert;
+      # skipping verification keeps the demo free of a CA mount (svc-local).
+{% for t in tempo_tenants %}
+      otlp/{{ t.name }}:
+        endpoint: "tempo-{{ tempo_name }}-gateway.{{ observability_namespace }}.svc:8090"
+        tls:
+          insecure: false
+          insecure_skip_verify: true
+        auth:
+          authenticator: bearertokenauth
+        headers:
+          X-Scope-OrgID: "{{ t.name }}"
+{% endfor %}
+      # design.md sec 3.3: app metrics arrive via OTLP and the collector
+      # exposes ONE Prometheus endpoint. UWM (the native metrics store,
+      # sec 3.2) scrapes it via a ServiceMonitor. resource_to_telemetry
+      # turns resource attrs (service.name, k8s.namespace.name, ...) into
+      # metric labels so metrics carry the same correlation keys (sec 9).
+      prometheus:
+        endpoint: 0.0.0.0:{{ otel_gateway_metrics_port }}
+        resource_to_telemetry_conversion:
+          enabled: true
+        enable_open_metrics: true
+      debug:
+        verbosity: basic
+
+    service:
+      extensions: [bearertokenauth]
+      pipelines:
+        # Ingest + enrich once, then fan out to per-tenant pipelines that
+        # tail-sample independently and export to their tenant.
+        traces/in:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource]
+          exporters: [routing]
+{% for t in tempo_tenants %}
+        traces/{{ t.name }}:
+          receivers: [routing]
+          processors: [tail_sampling, batch]
+          exporters: [otlp/{{ t.name }}, debug]
+{% endfor %}
+        # App metrics: enrich (same k8s/service attrs as traces) then
+        # expose for UWM scrape. NOT tenant-routed - metrics live in
+        # Prometheus/UWM, not Tempo (design.md sec 2 taxonomy).
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [prometheus]

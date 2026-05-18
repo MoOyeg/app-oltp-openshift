@@ -1,0 +1,8 @@
+.kubeconfig
+*.retry
+artifacts/
+deploy*.log
+validate.log
+inventory/host_vars/cluster.yml
+__pycache__/
+*.pyc

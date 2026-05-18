@@ -1,0 +1,37 @@
+---
+# Platform-owned, cluster-wide FlowCollector (design.md sec 3.5: Dev teams
+# do NOT edit this). eBPF agent (DaemonSet) -> flowlogs-pipeline ->
+# LokiStack (flow records, openshift-network tenant) + Prometheus (flow
+# metrics) + the NetObserv console plugin.
+apiVersion: flows.netobserv.io/v1beta2
+kind: FlowCollector
+metadata:
+  name: cluster
+spec:
+  namespace: {{ netobserv_namespace }}
+  deploymentModel: Direct
+  agent:
+    type: eBPF
+    ebpf:
+      sampling: {{ netobserv_sampling }}
+      logLevel: info
+  processor:
+    logLevel: info
+    # design.md sec 3.5: allow project admins to manage namespace-scoped
+    # FlowCollectorSlice resources. AlwaysCollect => Platform still
+    # collects cluster-wide; slices add per-team sampling/enrichment.
+    slicesConfig:
+      enable: true
+  loki:
+    enable: true
+    mode: LokiStack
+    lokiStack:
+      name: loki
+      namespace: {{ netobserv_namespace }}
+  prometheus:
+    querier:
+      enable: true
+  consolePlugin:
+    enable: true
+    advanced:
+      register: true

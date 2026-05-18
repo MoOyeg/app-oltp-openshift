@@ -1,0 +1,50 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ platform_logging_namespace }}
+---
+# Same demo MinIO, NEW bucket. A LokiStack has ONE tenancy mode, so this is
+# a SEPARATE stack from the NetObserv one (openshift-network) - this one is
+# openshift-logging => application/infrastructure/audit tenants.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logging-loki-s3
+  namespace: {{ platform_logging_namespace }}
+type: Opaque
+stringData:
+  endpoint: "http://minio.{{ observability_namespace }}.svc:9000"
+  bucketnames: "{{ platform_loki_bucket }}"
+  access_key_id: "{{ minio_root_user }}"
+  access_key_secret: "{{ minio_root_password }}"
+  region: "us-east-1"
+---
+# design.md sec 3.3/3.4: object-storage Loki for platform logs. Tenant mode
+# openshift-logging is what makes infrastructure/audit admin-only (their
+# reader ClusterRoles are cluster-scoped; we bind them to admins ONLY).
+apiVersion: loki.grafana.com/v1
+kind: LokiStack
+metadata:
+  name: logging-loki
+  namespace: {{ platform_logging_namespace }}
+spec:
+  size: {{ platform_loki_size }}
+  storage:
+    schemas:
+      - version: v13
+        effectiveDate: "2024-01-01"
+    secret:
+      name: logging-loki-s3
+      type: s3
+  storageClassName: {{ _platform_loki_sc }}
+  tenants:
+    mode: openshift-logging
+  limits:
+    global:
+      ingestion:
+        ingestionRate: {{ platform_loki_ingestion_mb }}
+        ingestionBurstSize: {{ platform_loki_ingestion_burst_mb }}
+        perStreamRateLimit: {{ platform_loki_ingestion_mb }}
+        perStreamRateLimitBurst: {{ platform_loki_ingestion_burst_mb }}
+  managementState: Managed

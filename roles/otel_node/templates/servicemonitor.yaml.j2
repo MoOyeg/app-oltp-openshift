@@ -1,0 +1,25 @@
+---
+# Host + kubelet metrics from the DaemonSet collector. Lives in the
+# Platform-owned {{ observability_namespace }} namespace, which the Dev
+# users have NO RBAC on - so this is effectively admin/Platform-only
+# (CPM remains the platform-metrics system of record, design.md sec 3.1;
+# this is the supplementary OTel host/kubelet view, sec 3.3).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ otel_node_name }}-platform-metrics
+  namespace: {{ observability_namespace }}
+  labels:
+    app.kubernetes.io/component: opentelemetry-collector
+spec:
+  namespaceSelector:
+    matchNames: ["{{ observability_namespace }}"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: opentelemetry-collector
+      app.kubernetes.io/instance: "{{ observability_namespace }}.{{ otel_node_name }}"
+      app.kubernetes.io/managed-by: opentelemetry-operator
+  endpoints:
+    - port: promexporter
+      path: /metrics
+      interval: 30s

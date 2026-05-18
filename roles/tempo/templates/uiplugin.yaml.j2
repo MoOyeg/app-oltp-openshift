@@ -1,0 +1,11 @@
+---
+# design.md sec 3.4: COO delivers the distributed-tracing console UIPlugin.
+# sec 9 "Support status": this is gated on the COO plugin's published support
+# status for the target OpenShift version; the Tempo Route below remains the
+# supported per-cluster break-glass UI if the console plugin is unavailable.
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: distributed-tracing
+spec:
+  type: DistributedTracing

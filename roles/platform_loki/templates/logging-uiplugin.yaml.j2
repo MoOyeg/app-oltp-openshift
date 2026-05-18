@@ -1,0 +1,22 @@
+---
+# COO Logging console plugin -> OpenShift console "Observe -> Logs".
+# Points at OUR openshift-logging LokiStack. Admin-only is still enforced
+# by the tenant RBAC: the console queries the lokistack gateway as the
+# logged-in user, so dev-quarkus/dev-python are SAR-denied infra/audit and
+# only cluster-admins (platform-logs-admin-reader) see platform logs.
+# schema = the console plugin's LogQL query TEMPLATE (NOT a collector -
+# there is one log source: the OTel DaemonSet via OTLP). On COO 1.4 +
+# Loki Operator OTLP ingestion the console "otel" template does not match
+# the stored stream labels; "viaq" does. Pinned to viaq via the var.
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: logging
+spec:
+  type: Logging
+  logging:
+    lokiStack:
+      name: logging-loki
+      namespace: {{ platform_logging_namespace }}
+    schema: {{ platform_logs_ui_schema | default('select') }}
+    logsLimit: 50

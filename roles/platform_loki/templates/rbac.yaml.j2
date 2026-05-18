@@ -1,0 +1,91 @@
+---
+# WRITE: the OTel DaemonSet collector's SA may push to the infra/audit
+# tenants of the openshift-logging LokiStack (SAR: loki.grafana.com,
+# resource=<tenant>, resourceName=logs, verb=create).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-logs-writer
+rules:
+  - apiGroups: ["loki.grafana.com"]
+    resources:
+{% for t in platform_log_tenants %}
+      - "{{ t }}"
+{% endfor %}
+    resourceNames: ["logs"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-logs-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-logs-writer
+subjects:
+  - kind: ServiceAccount
+    name: {{ otel_node_name }}-collector
+    namespace: {{ observability_namespace }}
+---
+# READ: infra/audit tenants are admin-only. design.md sec 3.5/sec 9:
+# infrastructure/audit need cluster-level reader roles reserved for
+# Platform/Security. Bound ONLY to {{ platform_logs_admin_group }} - the
+# Dev users (dev-quarkus / dev-python) are deliberately NEVER bound here,
+# so they cannot read platform/audit logs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-logs-admin-reader
+rules:
+  - apiGroups: ["loki.grafana.com"]
+    resources:
+{% for t in platform_log_tenants %}
+      - "{{ t }}"
+{% endfor %}
+    resourceNames: ["logs"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-logs-admin-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-logs-admin-reader
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ platform_logs_admin_group }}
+{% if 'application' in platform_log_tenants %}
+---
+# Per-team APPLICATION log reader. Namespace-scoped RoleBindings (not the
+# admin ClusterRoleBinding) so each Dev sees ONLY their namespace's app
+# logs in Observe -> Logs - the same isolation as their traces/metrics.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-app-logs-reader
+rules:
+  - apiGroups: ["loki.grafana.com"]
+    resources: ["application"]
+    resourceNames: ["logs"]
+    verbs: ["get"]
+{% for a in platform_app_namespaces %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ a.user }}-app-logs-reader
+  namespace: {{ a.ns }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-app-logs-reader
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ a.user }}
+{% endfor %}
+{% endif %}

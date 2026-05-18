@@ -1,0 +1,75 @@
+---
+# In-cluster S3 backend for TempoStack. design.md sec 3.4 requires Tempo to be
+# object-storage backed; this MinIO is a self-contained DEMO substitute for
+# ODF/Noobaa/external S3. Not for production (single replica, demo creds).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-creds
+  namespace: {{ observability_namespace }}
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: "{{ minio_root_user }}"
+  MINIO_ROOT_PASSWORD: "{{ minio_root_password }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: {{ observability_namespace }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+{% if minio_storage_class %}
+  storageClassName: {{ minio_storage_class }}
+{% endif %}
+  resources:
+    requests:
+      storage: {{ minio_storage_size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: {{ observability_namespace }}
+  labels: { app: minio }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: minio }
+  template:
+    metadata:
+      labels: { app: minio }
+    spec:
+      containers:
+        - name: minio
+          image: {{ minio_image }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          envFrom:
+            - secretRef: { name: minio-creds }
+          ports:
+            - { name: s3, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:   { cpu: "1", memory: 1Gi }
+            requests: { cpu: 100m, memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: minio-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ observability_namespace }}
+spec:
+  selector: { app: minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: 9000 }
+    - { name: console, port: 9001, targetPort: 9001 }

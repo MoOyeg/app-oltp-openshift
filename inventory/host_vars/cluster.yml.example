@@ -1,0 +1,31 @@
+---
+# Per-cluster overrides. Copy to inventory/host_vars/cluster.yml (setup.sh
+# does this for you) and change only what differs from group_vars/all.yml.
+#
+# Common overrides:
+
+# otel_environment_name: "staging"          # design.md canonical resource attr
+
+# --- Pin operator channels to the target OpenShift version (design.md sec 9)
+# operators:
+#   opentelemetry: { name: opentelemetry-product, channel: "stable", source: redhat-operators, namespace: openshift-opentelemetry-operator }
+#   tempo:         { name: tempo-product,         channel: "stable", source: redhat-operators, namespace: openshift-tempo-operator }
+#   coo:           { name: cluster-observability-operator, channel: "stable", source: redhat-operators, namespace: openshift-cluster-observability-operator }
+
+# --- Point Tempo at real object storage instead of the demo MinIO
+# (replace the whole minio_* / tempo backend story per design.md sec 3.4).
+# minio_storage_class: "ocs-storagecluster-ceph-rbd"
+# tempo_storage_class: "ocs-storagecluster-ceph-rbd"
+# tempo_retention: "720h"                   # 30d hot (design.md sec 4.1 ceiling)
+
+# --- Tune tail sampling for this cluster's traffic (design.md sec 3.3)
+# otel_tailsampling:
+#   decision_wait_s: 15
+#   num_traces: 200000
+#   expected_new_traces_per_sec: 1000
+#   slow_latency_ms: 300
+#   baseline_percent: 5
+
+# --- Turn the privileged node DaemonSet off entirely if host metrics are
+# already covered by CPM/node-exporter (design.md sec 3.1).
+# otel_daemonset_enabled: false

@@ -1,0 +1,58 @@
+---
+# design.md sec 3.3: the DaemonSet collector "increases privilege and
+# resource footprint". With platform logs/audit it must read root-only
+# audit files + kubelet, so it needs the `privileged` SCC (hostaccess is
+# not enough). It remains OFF the trace path and Platform-owned.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ otel_node_name }}-collector
+  namespace: {{ observability_namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ otel_node_name }}-otel-scc
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["{{ 'privileged' if platform_telemetry_enabled else 'hostaccess' }}"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ otel_node_name }}-otel-scc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ otel_node_name }}-otel-scc
+subjects:
+  - kind: ServiceAccount
+    name: {{ otel_node_name }}-collector
+    namespace: {{ observability_namespace }}
+{% if platform_telemetry_enabled %}
+---
+# kubeletstats receiver auth: read the kubelet /stats/summary API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ otel_node_name }}-kubeletstats
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/stats", "nodes/proxy", "nodes/metrics"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ otel_node_name }}-kubeletstats
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ otel_node_name }}-kubeletstats
+subjects:
+  - kind: ServiceAccount
+    name: {{ otel_node_name }}-collector
+    namespace: {{ observability_namespace }}
+{% endif %}

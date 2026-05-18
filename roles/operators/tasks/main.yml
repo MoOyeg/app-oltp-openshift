@@ -1,0 +1,89 @@
+---
+# design.md sec 8 phase 4: Tempo Operator + OTel Operator + COO UI plugins.
+# Install all three via OLM, then block until each ClusterServiceVersion
+# reports Succeeded so later roles can create the CRs they own.
+
+- name: Ensure operator install namespaces exist
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'namespace.yaml.j2') }}"
+  loop:
+    - "{{ operators.opentelemetry.namespace }}"
+    - "{{ operators.tempo.namespace }}"
+    - "{{ operators.coo.namespace }}"
+
+- name: Ensure application namespaces exist
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'namespace.yaml.j2') }}"
+  loop:
+    - "{{ observability_namespace }}"
+    - "{{ quarkus_namespace }}"
+    - "{{ python_namespace }}"
+
+# A merge-patch can't remove a label, so strip the CPM opt-in label
+# explicitly (idempotent) - otherwise UWM skips these namespaces.
+- name: Remove openshift.io/cluster-monitoring label (UWM eligibility)
+  kubernetes.core.k8s_json_patch:
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+    patch:
+      - op: remove
+        path: /metadata/labels/openshift.io~1cluster-monitoring
+  loop:
+    - "{{ observability_namespace }}"
+    - "{{ quarkus_namespace }}"
+    - "{{ python_namespace }}"
+  failed_when: false   # absent on fresh installs / already-clean
+
+- name: Create OperatorGroups
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'operatorgroup.yaml.j2') }}"
+  loop: "{{ [operators.opentelemetry, operators.tempo, operators.coo] }}"
+  loop_control: { loop_var: op }
+
+- name: Create Subscriptions
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'subscription.yaml.j2') }}"
+  loop: "{{ [operators.opentelemetry, operators.tempo, operators.coo] }}"
+  loop_control: { loop_var: op }
+
+# The CSV name (e.g. opentelemetry-operator.vX) differs from the package
+# name (opentelemetry-product), so resolve it from the Subscription's
+# status.installedCSV rather than guessing by name.
+- name: Wait for each Subscription to report an installed CSV
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ op.name }}"
+    namespace: "{{ op.namespace }}"
+  register: _sub
+  loop: "{{ [operators.opentelemetry, operators.tempo, operators.coo] }}"
+  loop_control: { loop_var: op, label: "{{ op.name }}" }
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until:
+    - _sub.resources | length > 0
+    - _sub.resources[0].status.installedCSV is defined
+    - (_sub.resources[0].status.installedCSV | default('')) | length > 0
+
+- name: Wait for each installed CSV to reach Succeeded
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ _sub.results[idx].resources[0].status.installedCSV }}"
+    namespace: "{{ op.namespace }}"
+  register: _csv
+  loop: "{{ [operators.opentelemetry, operators.tempo, operators.coo] }}"
+  loop_control:
+    loop_var: op
+    index_var: idx
+    label: "{{ op.name }} -> {{ _sub.results[idx].resources[0].status.installedCSV }}"
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until:
+    - _csv.resources | length > 0
+    - (_csv.resources[0].status.phase | default('')) == 'Succeeded'

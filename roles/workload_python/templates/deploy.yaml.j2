@@ -1,0 +1,92 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ python_app_name }}
+  namespace: {{ python_namespace }}
+  labels:
+    app: {{ python_app_name }}
+spec:
+  replicas: {{ python_replicas }}
+  selector:
+    matchLabels:
+      app: {{ python_app_name }}
+  template:
+    metadata:
+      labels:
+        app: {{ python_app_name }}
+      annotations:
+        # design.md sec 3.3 auto-inject. References the Instrumentation CR
+        # in THIS namespace; the operator injects the Python SDK (flask +
+        # requests + psycopg2 instrumentations) -> exports to the gateway.
+        instrumentation.opentelemetry.io/inject-python: "{{ instrumentation_name }}"
+        instrumentation.opentelemetry.io/container-names: "app"
+        # Roll the pod when the app source (ConfigMap) changes - a volume
+        # ConfigMap update alone does not restart pods.
+        demo/src-checksum: "{{ lookup('template', 'app.yaml.j2') | hash('sha1') }}"
+    spec:
+      containers:
+        - name: app
+          image: "{{ python_base_image }}"
+          workingDir: /app
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              pip install --no-cache-dir --index-url {{ python_pip_index_url }}
+              flask requests psycopg2-binary &&
+              python /app/app.py
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: "{{ python_app_name }}"
+            - { name: DB_HOST, value: "appdb.{{ python_namespace }}.svc" }
+            - { name: DB_NAME, valueFrom: { secretKeyRef: { name: appdb, key: database-name } } }
+            - { name: DB_USER, valueFrom: { secretKeyRef: { name: appdb, key: database-user } } }
+            - { name: DB_PASSWORD, valueFrom: { secretKeyRef: { name: appdb, key: database-password } } }
+          readinessProbe:
+            httpGet: { path: /, port: 8080 }
+            initialDelaySeconds: 25
+            periodSeconds: 10
+          resources:
+            limits: { cpu: 500m, memory: 256Mi }
+            requests: { cpu: 50m, memory: 128Mi }
+          volumeMounts:
+            - { name: src, mountPath: /app }
+      volumes:
+        - name: src
+          configMap:
+            name: {{ python_app_name }}-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ python_app_name }}
+  namespace: {{ python_namespace }}
+  labels:
+    app: {{ python_app_name }}
+spec:
+  selector:
+    app: {{ python_app_name }}
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+# No ServiceMonitor: metrics leave via OTLP to the gateway collector
+# (design.md sec 3.3), which exposes one Prometheus endpoint for UWM.
+{% if python_expose_route %}
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ python_app_name }}
+  namespace: {{ python_namespace }}
+spec:
+  path: /checkout
+  to:
+    kind: Service
+    name: {{ python_app_name }}
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+{% endif %}

@@ -1,0 +1,73 @@
+---
+# One PostgreSQL per app namespace (design decision: DB per app). DB calls
+# are auto-instrumented downstream: Quarkus via quarkus.datasource.jdbc
+# .telemetry, Python via the OTel psycopg2 instrumentation -> DB spans
+# appear inside the application traces (design.md sec 3.3 enrichment/spans).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: appdb
+  namespace: {{ ns }}
+type: Opaque
+stringData:
+  database-user: "{{ postgres_user }}"
+  database-password: "{{ postgres_password }}"
+  database-name: "{{ postgres_db }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: appdb
+  namespace: {{ ns }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ postgres_storage_size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appdb
+  namespace: {{ ns }}
+  labels: { app: appdb }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: appdb }
+  template:
+    metadata:
+      labels: { app: appdb }
+    spec:
+      containers:
+        - name: postgresql
+          image: {{ postgres_image }}
+          ports:
+            - containerPort: 5432
+          env:
+            - { name: POSTGRESQL_USER,     valueFrom: { secretKeyRef: { name: appdb, key: database-user } } }
+            - { name: POSTGRESQL_PASSWORD, valueFrom: { secretKeyRef: { name: appdb, key: database-password } } }
+            - { name: POSTGRESQL_DATABASE, valueFrom: { secretKeyRef: { name: appdb, key: database-name } } }
+          readinessProbe:
+            exec: { command: ["/usr/libexec/check-container"] }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/pgsql/data }
+          resources:
+            limits:   { cpu: "500m", memory: 512Mi }
+            requests: { cpu: 50m, memory: 128Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: appdb }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: appdb
+  namespace: {{ ns }}
+spec:
+  selector: { app: appdb }
+  ports:
+    - { name: postgres, port: 5432, targetPort: 5432 }

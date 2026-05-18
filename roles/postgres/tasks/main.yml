@@ -1,0 +1,27 @@
+---
+# Deploy a PostgreSQL into each app namespace.
+- name: Deploy PostgreSQL per app namespace
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'postgres.yaml.j2') }}"
+  loop:
+    - "{{ quarkus_namespace }}"
+    - "{{ python_namespace }}"
+  loop_control: { loop_var: ns }
+
+- name: Wait for each PostgreSQL to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: appdb
+    namespace: "{{ ns }}"
+  loop:
+    - "{{ quarkus_namespace }}"
+    - "{{ python_namespace }}"
+  loop_control: { loop_var: ns }
+  register: _pg
+  retries: 30
+  delay: 10
+  until: >
+    _pg.resources | length > 0 and
+    (_pg.resources[0].status.availableReplicas | default(0)) | int >= 1

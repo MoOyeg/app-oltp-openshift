@@ -1,0 +1,38 @@
+---
+# Hits /checkout so every request fans out:
+#   python /checkout -> python /inventory -> psycopg2 (python DB)
+#                     -> Quarkus /api/price -> Quarkus JDBC (quarkus DB)
+# i.e. one deep distributed trace whose spans split across BOTH tenants.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ python_app_name }}-loadgen
+  namespace: {{ python_namespace }}
+  labels:
+    app: {{ python_app_name }}-loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ python_app_name }}-loadgen
+  template:
+    metadata:
+      labels:
+        app: {{ python_app_name }}-loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: {{ loadgen_image }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              b="http://{{ python_app_name }}.{{ python_namespace }}.svc:8080"
+              while true; do
+                curl -s -o /dev/null "$b/checkout" || true
+                curl -s -o /dev/null "$b/inventory" || true
+                sleep {{ loadgen_interval_s }}
+              done
+          resources:
+            limits: { cpu: 50m, memory: 64Mi }
+            requests: { cpu: 10m, memory: 32Mi }

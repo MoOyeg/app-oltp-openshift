@@ -1,0 +1,94 @@
+---
+- name: Install the Loki Operator (OperatorGroup + Subscription)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'operator.yaml.j2') }}"
+
+- name: Wait for the Loki Operator Subscription to install a CSV
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ netobserv_operators.loki.name }}"
+    namespace: "{{ netobserv_operators.loki.namespace }}"
+  register: _lsub
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until:
+    - _lsub.resources | length > 0
+    - (_lsub.resources[0].status.installedCSV | default('')) | length > 0
+
+- name: Wait for the Loki Operator CSV to Succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ _lsub.resources[0].status.installedCSV }}"
+    namespace: "{{ netobserv_operators.loki.namespace }}"
+  register: _lcsv
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until:
+    - _lcsv.resources | length > 0
+    - (_lcsv.resources[0].status.phase | default('')) == 'Succeeded'
+
+- name: Create the NetObserv Loki bucket in MinIO
+  kubernetes.core.k8s:
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    name: netobserv-loki-make-bucket
+    namespace: "{{ observability_namespace }}"
+    wait: true
+    wait_timeout: 120
+
+- name: (Re)create the bucket Job
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'bucket-job.yaml.j2') }}"
+
+- name: Wait for the bucket Job to complete
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: Job
+    name: netobserv-loki-make-bucket
+    namespace: "{{ observability_namespace }}"
+  register: _ljob
+  retries: 30
+  delay: 10
+  until: >
+    _ljob.resources | length > 0 and
+    (_ljob.resources[0].status.succeeded | default(0)) | int >= 1
+
+- name: Discover the default StorageClass (LokiStack requires one explicitly)
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+  register: _sc
+  when: not netobserv_loki_storage_class
+
+- name: Resolve LokiStack StorageClass
+  ansible.builtin.set_fact:
+    _netobserv_loki_sc: >-
+      {{ netobserv_loki_storage_class if netobserv_loki_storage_class
+         else (_sc.resources
+                | json_query('[?metadata.annotations."storageclass.kubernetes.io/is-default-class"==`"true"`].metadata.name')
+                | first) }}
+
+- name: Create the LokiStack (tenant mode openshift-network)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'lokistack.yaml.j2') }}"
+
+- name: Wait for LokiStack to be Ready
+  kubernetes.core.k8s_info:
+    api_version: loki.grafana.com/v1
+    kind: LokiStack
+    name: loki
+    namespace: "{{ netobserv_namespace }}"
+  register: _lks
+  retries: 50
+  delay: 15
+  until: >
+    _lks.resources | length > 0 and
+    (_lks.resources[0].status.conditions | default([])
+      | selectattr('type','equalto','Ready')
+      | selectattr('status','equalto','True') | list | length) > 0

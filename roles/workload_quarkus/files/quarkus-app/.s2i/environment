@@ -1,0 +1,4 @@
+# Quarkus uber-jar leaves both the thin and the *-runner.jar in target/;
+# tell the ubi9/openjdk S2I run script which one to launch.
+JAVA_APP_JAR=quarkus-otel-demo-1.0.0-runner.jar
+MAVEN_S2I_ARTIFACT_DIRS=target

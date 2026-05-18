@@ -1,0 +1,44 @@
+---
+# design.md sec 3.2: enable User Workload Monitoring so the Dev-owned
+# ServiceMonitors (created with each app) are scraped by the separate UWM
+# Prometheus. We merge into the existing cluster-monitoring-config rather
+# than clobber it (the CM also controls CPM/platform settings, sec 3.1).
+- name: Read existing cluster-monitoring-config
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cluster-monitoring-config
+    namespace: openshift-monitoring
+  register: _cmo
+
+- name: Compute merged monitoring config (preserve other keys)
+  ansible.builtin.set_fact:
+    _cmo_cfg: >-
+      {{ ( (_cmo.resources[0].data['config.yaml'] | default('{}') | from_yaml) | default({}, true) )
+         | combine({'enableUserWorkload': true}, recursive=True) }}
+
+- name: Enable User Workload Monitoring
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cluster-monitoring-config
+        namespace: openshift-monitoring
+      data:
+        config.yaml: "{{ _cmo_cfg | to_nice_yaml }}"
+
+- name: Wait for the UWM Prometheus to come up
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    namespace: openshift-user-workload-monitoring
+    label_selectors:
+      - "app.kubernetes.io/name=prometheus"
+  register: _uwm
+  retries: 30
+  delay: 10
+  until: >
+    _uwm.resources | length > 0 and
+    (_uwm.resources[0].status.readyReplicas | default(0)) | int >= 1

@@ -1,0 +1,27 @@
+---
+# Loki Operator (design.md sec 3.4/3.5: object-storage-backed Loki). 6.x is
+# required for the LokiStack `openshift-network` tenant mode that gives
+# NetObserv its per-namespace flow RBAC.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ netobserv_operators.loki.namespace }}
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: loki-operator-og
+  namespace: {{ netobserv_operators.loki.namespace }}
+spec: {}
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: {{ netobserv_operators.loki.name }}
+  namespace: {{ netobserv_operators.loki.namespace }}
+spec:
+  channel: {{ netobserv_operators.loki.channel }}
+  name: {{ netobserv_operators.loki.name }}
+  source: {{ netobserv_operators.loki.source }}
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

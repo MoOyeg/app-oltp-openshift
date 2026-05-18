@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.acme</groupId>
+  <artifactId>quarkus-otel-demo</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+    <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+    <!-- 3.20 LTS: includes the quarkus-micrometer-opentelemetry bridge
+         (absent from the 3.15 BOM). Java 21, ubi9/openjdk-21 compatible. -->
+    <quarkus.platform.version>3.20.0</quarkus.platform.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>${quarkus.platform.artifact-id}</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest</artifactId></dependency>
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest-jackson</artifactId></dependency>
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-hibernate-orm-panache</artifactId></dependency>
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-jdbc-postgresql</artifactId></dependency>
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-opentelemetry</artifactId></dependency>
+    <!-- Required by quarkus.datasource.jdbc.telemetry=true (DB spans);
+         not pulled transitively. Version managed by the Quarkus BOM. -->
+    <dependency><groupId>io.opentelemetry.instrumentation</groupId><artifactId>opentelemetry-jdbc</artifactId></dependency>
+    <!-- The bridge: Quarkus auto-instruments via Micrometer; this
+         extension exports those JVM/HTTP meters to OpenTelemetry (OTLP).
+         Without it, quarkus.otel.metrics.enabled only covers custom
+         Meter-API metrics. No Prometheus registry / scrape endpoint. -->
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-micrometer-opentelemetry</artifactId></dependency>
+    <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-smallrye-health</artifactId></dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>quarkus-maven-plugin</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <extensions>true</extensions>
+        <executions>
+          <execution>
+            <goals><goal>build</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

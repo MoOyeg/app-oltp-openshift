@@ -1,0 +1,55 @@
+---
+- name: Create the Tempo S3 storage secret (-> MinIO)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tempo-s3-secret.yaml.j2') }}"
+
+- name: Tenant read/write RBAC for the multitenant gateway
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tenant-rbac.yaml.j2') }}"
+
+- name: Drop legacy jaegerQuery ingress (webhook forbids it with gateway on)
+  kubernetes.core.k8s_json_patch:
+    api_version: tempo.grafana.com/v1alpha1
+    kind: TempoStack
+    name: "{{ tempo_name }}"
+    namespace: "{{ observability_namespace }}"
+    patch:
+      - op: remove
+        path: /spec/template/queryFrontend/jaegerQuery/ingress
+  failed_when: false   # absent on fresh installs / already-clean stacks
+
+- name: Create the TempoStack (design.md sec 3.4)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tempostack.yaml.j2') }}"
+
+- name: Wait for TempoStack Ready
+  kubernetes.core.k8s_info:
+    api_version: tempo.grafana.com/v1alpha1
+    kind: TempoStack
+    name: "{{ tempo_name }}"
+    namespace: "{{ observability_namespace }}"
+  register: _ts
+  retries: 40
+  delay: 15
+  until: >
+    _ts.resources | length > 0 and
+    (_ts.resources[0].status.conditions | default([])
+      | selectattr('type','equalto','Ready')
+      | selectattr('status','equalto','True') | list | length) > 0
+
+- name: Enable the distributed-tracing console UIPlugin (COO)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'uiplugin.yaml.j2') }}"
+  register: _uiplugin
+  failed_when: false
+
+- name: Note if the UIPlugin CRD is not present on this OpenShift version
+  ansible.builtin.debug:
+    msg: >-
+      UIPlugin not created ({{ _uiplugin.msg | default('CRD missing') }}).
+      design.md sec 9: fall back to the Tempo Jaeger Route for trace search.
+  when: _uiplugin is failed or (_uiplugin.result is not defined)

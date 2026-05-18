@@ -1,0 +1,118 @@
+---
+# destroy.yml - tear down in reverse dependency order. Operators and their
+# namespaces are removed last; CRDs are left in place by default (set
+# remove_crds=true to also delete them).
+- name: Tear down OpenTelemetry -> Tempo demonstration
+  hosts: cluster
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+  tasks:
+    - name: Delete the app namespaces
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+        wait: true
+        wait_timeout: 240
+      loop:
+        - "{{ quarkus_namespace }}"
+        - "{{ python_namespace }}"
+
+    - name: Delete the cluster FlowCollector (NetObserv)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: flows.netobserv.io/v1beta2
+        kind: FlowCollector
+        name: cluster
+      failed_when: false
+
+    - name: Delete the NetObserv + Loki namespaces
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+        wait: true
+        wait_timeout: 240
+      loop:
+        - "{{ netobserv_namespace }}"
+        - "{{ netobserv_operators.netobserv.namespace }}"
+        - "{{ platform_logging_namespace }}"
+      failed_when: false
+
+    - name: Remove platform-logs cluster RBAC
+      kubernetes.core.k8s:
+        state: absent
+        api_version: rbac.authorization.k8s.io/v1
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+      loop:
+        - { kind: ClusterRoleBinding, name: platform-logs-writer }
+        - { kind: ClusterRole,        name: platform-logs-writer }
+        - { kind: ClusterRoleBinding, name: platform-logs-admin-reader }
+        - { kind: ClusterRole,        name: platform-logs-admin-reader }
+      failed_when: false
+
+    - name: Remove the htpasswd IdP from the cluster OAuth
+      kubernetes.core.k8s_json_patch:
+        api_version: config.openshift.io/v1
+        kind: OAuth
+        name: cluster
+        patch:
+          - op: replace
+            path: /spec/identityProviders
+            value: []
+      failed_when: false
+
+    - name: Remove cross-namespace RBAC (tenant + user bindings)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: rbac.authorization.k8s.io/v1
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+      loop:
+        - { kind: ClusterRoleBinding, name: tempo-collector-write }
+        - { kind: ClusterRole,        name: tempo-collector-write }
+        - { kind: ClusterRoleBinding, name: tempo-quarkus-read }
+        - { kind: ClusterRole,        name: tempo-quarkus-read }
+        - { kind: ClusterRoleBinding, name: tempo-python-read }
+        - { kind: ClusterRole,        name: tempo-python-read }
+      failed_when: false
+
+    - name: Delete the observability namespace (Tempo, MinIO, collectors)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ observability_namespace }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: Delete the distributed-tracing UIPlugin
+      kubernetes.core.k8s:
+        state: absent
+        api_version: observability.openshift.io/v1alpha1
+        kind: UIPlugin
+        name: distributed-tracing
+
+    - name: Remove operator Subscriptions/OperatorGroups
+      ansible.builtin.include_role:
+        name: operators
+        tasks_from: teardown.yml
+
+    - name: Optionally remove CRDs
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+      loop:
+        - tempostacks.tempo.grafana.com
+        - tempomonolithics.tempo.grafana.com
+        - opentelemetrycollectors.opentelemetry.io
+        - instrumentations.opentelemetry.io
+        - uiplugins.observability.openshift.io
+      when: remove_crds | default(false) | bool

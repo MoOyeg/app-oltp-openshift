@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ item }}
+  # NOTE: deliberately NO `openshift.io/cluster-monitoring: "true"`.
+  # That label scopes a namespace to Core Platform Monitoring (sec 3.1)
+  # and makes User Workload Monitoring SKIP it - which would stop UWM
+  # scraping the collector's OTel-metrics ServiceMonitor (sec 3.2/3.3).
+  labels:
+    kubernetes.io/metadata.name: {{ item }}

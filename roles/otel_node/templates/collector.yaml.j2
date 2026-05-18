@@ -1,0 +1,195 @@
+---
+# design.md sec 3.3: "Use a DaemonSet collector ONLY for node-local needs
+# such as host metrics or log tailing, because it increases privilege and
+# resource footprint."  This is that collector:
+#   * host metrics + kubelet stats   -> Prometheus (admin-only ServiceMonitor)
+#   * infrastructure container logs  -> openshift-logging LokiStack tenant
+#   * audit logs                     -> audit tenant   (privileged)
+#   * NEVER on the trace path; platform metrics SoR remains CPM (sec 3.1).
+#
+# It is the SINGLE log collector (no OpenShift Logging/Vector on this
+# cluster), so design.md sec 3.3's "do not run two log collectors" holds.
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: {{ otel_node_name }}
+  namespace: {{ observability_namespace }}
+spec:
+  mode: daemonset
+  serviceAccount: {{ otel_node_name }}-collector
+  # NOT hostNetwork: it forced the :8889 exporter onto node IPs, which UWM
+  # could not scrape (context-deadline-exceeded). hostmetrics uses /hostfs,
+  # kubeletstats dials the kubelet over the pod network, filelog reads
+  # /hostfs - none need the host network namespace.
+  # A platform node-local collector must run on EVERY node, incl. control
+  # plane (kube-apiserver/openshift-apiserver/oauth audit logs live only on
+  # masters) and any tainted infra nodes. Tolerate all taints.
+  tolerations:
+    - operator: Exists
+  ports:
+    - name: promexporter
+      port: {{ otel_node_metrics_port | default(8889) }}
+      protocol: TCP
+{% if platform_telemetry_enabled %}
+  # Audit logs (/var/log/audit, API-server audit) are root-only 0600, and
+  # kubelet/journal access needs host privilege. design.md sec 3.3 flags
+  # exactly this added privilege; the `privileged` SCC is bound in scc-rbac.
+  securityContext:
+    runAsUser: 0
+    privileged: true
+{% endif %}
+  resources:
+{{ otel_node_resources | to_nice_yaml(indent=2) | indent(4, true) }}
+  env:
+    - name: K8S_NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+  volumes:
+    - name: hostfs
+      hostPath:
+        path: /
+  volumeMounts:
+    - name: hostfs
+      mountPath: /hostfs
+      readOnly: true
+      mountPropagation: HostToContainer
+  config:
+    receivers:
+      hostmetrics:
+        collection_interval: {{ otel_node_hostmetrics_interval_s }}s
+        root_path: /hostfs
+        scrapers:
+          cpu: {}
+          load: {}
+          memory: {}
+          disk: {}
+          filesystem: {}
+          network: {}
+{% if platform_telemetry_enabled %}
+      # Kubelet node/pod/container metrics (node-local, design.md sec 3.3).
+      kubeletstats:
+        collection_interval: {{ otel_node_hostmetrics_interval_s }}s
+        auth_type: serviceAccount
+        endpoint: "https://${env:K8S_NODE_NAME}:{{ platform_kubeletstats_port }}"
+        insecure_skip_verify: true
+        metric_groups: [node, pod, container]
+      # INFRASTRUCTURE: every pod's CRI-O log EXCEPT the app namespaces
+      # (their logs are application-tier, not platform).
+      filelog/infra:
+        include: ["/hostfs/var/log/pods/*/*/*.log"]
+        exclude:
+{% for ns in platform_infra_exclude_namespaces %}
+          - "/hostfs/var/log/pods/{{ ns }}_*/*/*.log"
+{% endfor %}
+        start_at: end
+        include_file_path: true
+        operators:
+          - type: container
+            id: crio-parser
+      # APPLICATION: ONLY the app namespaces' pod logs. The container
+      # parser sets k8s.namespace.name -> Loki stream label, which the
+      # openshift-logging `application` tenant uses for per-namespace RBAC
+      # (dev-quarkus/dev-python each see only their own namespace).
+      filelog/app:
+        include:
+{% for a in platform_app_namespaces %}
+          - "/hostfs/var/log/pods/{{ a.ns }}_*/*/*.log"
+{% endfor %}
+        start_at: end
+        include_file_path: true
+        operators:
+          - type: container
+            id: crio-parser
+      # AUDIT: kube-apiserver / openshift-apiserver / oauth / node auditd.
+      filelog/audit:
+        include:
+{% for p in platform_audit_paths %}
+          - "{{ p }}"
+{% endfor %}
+        start_at: end
+        include_file_path: true
+{% endif %}
+
+    processors:
+      resource:
+        attributes:
+          - key: k8s.node.name
+            value: "${env:K8S_NODE_NAME}"
+            action: upsert
+          - key: deployment.environment.name
+            value: "{{ otel_environment_name }}"
+            action: upsert
+      batch: {}
+{% if platform_telemetry_enabled %}
+      # LokiStack OTLP ingest requires >=1 stream label. Infra logs get
+      # k8s.namespace.name from the container parser; audit (raw host
+      # files) has none -> stamp log_type, the OpenShift-Logging canonical
+      # promoted stream label, per pipeline.
+      resource/infra:
+        attributes:
+          - { key: log_type, value: infrastructure, action: upsert }
+      resource/audit:
+        attributes:
+          - { key: log_type, value: audit, action: upsert }
+      resource/app:
+        attributes:
+          - { key: log_type, value: application, action: upsert }
+{% endif %}
+
+{% if platform_telemetry_enabled %}
+    extensions:
+      # Writes to the openshift-logging LokiStack tenants are authorized by
+      # the gateway via the collector SA token (platform-logs-writer role).
+      bearertokenauth:
+        filename: /var/run/secrets/kubernetes.io/serviceaccount/token
+{% endif %}
+
+    exporters:
+      # Host/kubelet metrics: Prometheus endpoint scraped by an ADMIN-ONLY
+      # Platform ServiceMonitor (NOT the per-team UWM path). CPM stays the
+      # platform-metrics system of record (design.md sec 3.1).
+      prometheus:
+        endpoint: 0.0.0.0:{{ otel_node_metrics_port | default(8889) }}
+        resource_to_telemetry_conversion:
+          enabled: true
+      debug:
+        verbosity: basic
+{% if platform_telemetry_enabled %}
+{% for t in platform_log_tenants %}
+      otlphttp/{{ t }}:
+        logs_endpoint: "https://logging-loki-gateway-http.{{ platform_logging_namespace }}.svc:8080/api/logs/v1/{{ t }}/otlp/v1/logs"
+        tls:
+          insecure_skip_verify: true
+        auth:
+          authenticator: bearertokenauth
+{% endfor %}
+{% endif %}
+
+    service:
+{% if platform_telemetry_enabled %}
+      extensions: [bearertokenauth]
+{% endif %}
+      pipelines:
+        metrics:
+          receivers: [hostmetrics{% if platform_telemetry_enabled %}, kubeletstats{% endif %}]
+          processors: [resource, batch]
+          exporters: [prometheus]
+{% if platform_telemetry_enabled %}
+        logs/infrastructure:
+          receivers: [filelog/infra]
+          processors: [resource, resource/infra, batch]
+          exporters: [otlphttp/infrastructure]
+{% if 'application' in platform_log_tenants %}
+        logs/application:
+          receivers: [filelog/app]
+          processors: [resource, resource/app, batch]
+          exporters: [otlphttp/application]
+{% endif %}
+{% if 'audit' in platform_log_tenants %}
+        logs/audit:
+          receivers: [filelog/audit]
+          processors: [resource, resource/audit, batch]
+          exporters: [otlphttp/audit]
+{% endif %}
+{% endif %}

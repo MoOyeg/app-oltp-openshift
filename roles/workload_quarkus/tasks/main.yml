@@ -1,0 +1,90 @@
+---
+# Pre-refactor builds shipped a per-app ServiceMonitor (Prometheus scrape
+# of /q/metrics). Metrics now leave via OTLP, so remove the stale one - a
+# template apply does not prune objects dropped from the template.
+- name: Remove the pre-refactor per-app ServiceMonitor
+  kubernetes.core.k8s:
+    state: absent
+    api_version: monitoring.coreos.com/v1
+    kind: ServiceMonitor
+    name: "{{ quarkus_app_name }}"
+    namespace: "{{ quarkus_namespace }}"
+
+- name: Create the Quarkus ImageStream + (binary) BuildConfig
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'build.yaml.j2') }}"
+
+- name: Check whether a usable image already exists
+  kubernetes.core.k8s_info:
+    api_version: image.openshift.io/v1
+    kind: ImageStreamTag
+    name: "{{ quarkus_app_name }}:latest"
+    namespace: "{{ quarkus_namespace }}"
+  register: _qimg
+
+- name: Binary S2I build from the in-repo Quarkus source (Maven build)
+  ansible.builtin.command:
+    cmd: >-
+      oc start-build {{ quarkus_app_name }}
+      -n {{ quarkus_namespace }}
+      --from-dir={{ role_path }}/files/quarkus-app
+      --follow --wait
+  environment:
+    KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+  register: _qbuild
+  changed_when: true
+  when: (_qimg.resources | length) == 0 or (quarkus_force_rebuild | default(false) | bool)
+
+- name: Wait for the Quarkus image to exist
+  kubernetes.core.k8s_info:
+    api_version: image.openshift.io/v1
+    kind: ImageStreamTag
+    name: "{{ quarkus_app_name }}:latest"
+    namespace: "{{ quarkus_namespace }}"
+  register: _qimg2
+  retries: 30
+  delay: 15
+  until: _qimg2.resources | length > 0
+
+- name: Deploy the Quarkus workload (+ Service + ServiceMonitor + Route)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'deploy.yaml.j2') }}"
+
+# A rebuilt image keeps the same :latest tag, so the Deployment spec is
+# unchanged and Kubernetes never rolls. Force a rollout when we just built.
+- name: Roll the Quarkus Deployment to pick up the rebuilt image
+  ansible.builtin.command:
+    cmd: oc rollout restart deployment/{{ quarkus_app_name }} -n {{ quarkus_namespace }}
+  environment:
+    KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+  changed_when: true
+  when: _qbuild is defined and (_qbuild is changed)
+
+- name: Wait for the rebuilt Quarkus rollout to complete
+  ansible.builtin.command:
+    cmd: oc rollout status deployment/{{ quarkus_app_name }} -n {{ quarkus_namespace }} --timeout=240s
+  environment:
+    KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+  changed_when: false
+  when: _qbuild is defined and (_qbuild is changed)
+
+- name: Deploy the Quarkus load generator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'loadgen.yaml.j2') }}"
+  when: loadgen_enabled | bool
+
+- name: Wait for the Quarkus workload to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ quarkus_app_name }}"
+    namespace: "{{ quarkus_namespace }}"
+  register: _qdep
+  retries: 40
+  delay: 15
+  until: >
+    _qdep.resources | length > 0 and
+    (_qdep.resources[0].status.availableReplicas | default(0)) | int >= 1

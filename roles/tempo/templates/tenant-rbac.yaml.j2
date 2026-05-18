@@ -1,0 +1,60 @@
+---
+# Tempo gateway (tenants.mode=openshift) authorizes trace read/write via
+# SubjectAccessReview on apiGroup tempo.grafana.com, resource=<tenantName>,
+# resourceName=traces.
+#
+# WRITE: the gateway collector's SA may write to ALL tenants (it routes by
+# namespace). READ: each tenant's reader_user may read ONLY that tenant -
+# this is the design.md sec 9 per-namespace RBAC isolation proof.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tempo-collector-write
+rules:
+  - apiGroups: ["tempo.grafana.com"]
+    resources:
+{% for t in tempo_tenants %}
+      - "{{ t.name }}"
+{% endfor %}
+    resourceNames: ["traces"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tempo-collector-write
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tempo-collector-write
+subjects:
+  - kind: ServiceAccount
+    name: {{ otel_gateway_name }}-collector
+    namespace: {{ observability_namespace }}
+{% for t in tempo_tenants %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tempo-{{ t.name }}-read
+rules:
+  - apiGroups: ["tempo.grafana.com"]
+    resources: ["{{ t.name }}"]
+    resourceNames: ["traces"]
+    verbs: ["get"]
+---
+# Bound to ONLY this tenant's Dev user. {{ t.reader_user }} can read
+# {{ t.name }} traces; querying any other tenant returns 403.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tempo-{{ t.name }}-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tempo-{{ t.name }}-read
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ t.reader_user }}
+{% endfor %}

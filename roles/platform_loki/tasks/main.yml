@@ -1,0 +1,103 @@
+---
+# Loki Operator is shared with roles/loki; applying its Subscription again
+# is idempotent (covers running platform_loki without netobserv).
+- name: Ensure the Loki Operator is installed
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'operator.yaml.j2') }}"
+
+- name: Wait for the Loki Operator CSV to be present/Succeeded
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ netobserv_operators.loki.namespace }}"
+  register: _lcsv
+  retries: "{{ (operator_csv_wait_timeout | int // 15) }}"
+  delay: 15
+  until: >
+    _lcsv.resources
+      | selectattr('metadata.name','search','loki-operator')
+      | selectattr('status.phase','defined')
+      | selectattr('status.phase','equalto','Succeeded') | list | length > 0
+
+- name: Recreate the platform-logs bucket Job
+  kubernetes.core.k8s:
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    name: platform-logs-make-bucket
+    namespace: "{{ observability_namespace }}"
+    wait: true
+    wait_timeout: 120
+
+- name: Create the platform-logs bucket Job
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'bucket-job.yaml.j2') }}"
+
+- name: Wait for the bucket Job
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: Job
+    name: platform-logs-make-bucket
+    namespace: "{{ observability_namespace }}"
+  register: _pjob
+  retries: 30
+  delay: 10
+  until: >
+    _pjob.resources | length > 0 and
+    (_pjob.resources[0].status.succeeded | default(0)) | int >= 1
+
+- name: Discover default StorageClass (LokiStack needs one explicitly)
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+  register: _psc
+  when: not platform_loki_storage_class
+
+- name: Resolve platform LokiStack StorageClass
+  ansible.builtin.set_fact:
+    _platform_loki_sc: >-
+      {{ platform_loki_storage_class if platform_loki_storage_class
+         else (_psc.resources
+                | json_query('[?metadata.annotations."storageclass.kubernetes.io/is-default-class"==`"true"`].metadata.name')
+                | first) }}
+
+- name: Create the openshift-logging LokiStack
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'lokistack.yaml.j2') }}"
+
+- name: Admin-only tenant RBAC (writer for collector SA, reader for admins)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'rbac.yaml.j2') }}"
+
+- name: Wait for the platform LokiStack to be Ready
+  kubernetes.core.k8s_info:
+    api_version: loki.grafana.com/v1
+    kind: LokiStack
+    name: logging-loki
+    namespace: "{{ platform_logging_namespace }}"
+  register: _plks
+  retries: 50
+  delay: 15
+  until: >
+    _plks.resources | length > 0 and
+    (_plks.resources[0].status.conditions | default([])
+      | selectattr('type','equalto','Ready')
+      | selectattr('status','equalto','True') | list | length) > 0
+
+- name: Console "Observe -> Logs" UIPlugin (COO) for platform logs
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'logging-uiplugin.yaml.j2') }}"
+  register: _loguip
+  failed_when: false
+
+- name: Note if the Logging UIPlugin was not accepted (COO version)
+  ansible.builtin.debug:
+    msg: >-
+      Logging UIPlugin not created ({{ _loguip.msg | default('check COO support') }}).
+      Platform logs still queryable via the LokiStack gateway (admin-only).
+  when: _loguip is failed or (_loguip.result is not defined)

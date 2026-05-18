@@ -1,0 +1,34 @@
+---
+# One-shot job: wait for MinIO, then create the Tempo bucket idempotently.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-make-bucket
+  namespace: {{ observability_namespace }}
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: {{ minio_mc_image }}
+          envFrom:
+            - secretRef: { name: minio-creds }
+          env:
+            # OpenShift restricted SCC runs this as a random UID with no
+            # writable HOME, so point mc's config at a world-writable dir.
+            - { name: HOME, value: /tmp }
+            - { name: MC_CONFIG_DIR, value: /tmp/.mc }
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              mkdir -p /tmp/.mc
+              until mc alias set local http://minio:9000 \
+                    "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "waiting for minio..."; sleep 3
+              done
+              mc mb --ignore-existing local/{{ minio_bucket }}
+              echo "bucket {{ minio_bucket }} ready"

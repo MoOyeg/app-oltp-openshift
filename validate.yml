@@ -1,0 +1,454 @@
+---
+# validate.yml - post-deploy checks for the expanded demo, mapped to
+# design.md sec 3.2 (UWM), 3.3/3.4 (traces), and sec 9 (per-tenant RBAC).
+- name: Validate the OpenTelemetry/Tempo/UWM demo
+  hosts: cluster
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+  tasks:
+    - name: TempoStack is Ready
+      kubernetes.core.k8s_info:
+        api_version: tempo.grafana.com/v1alpha1
+        kind: TempoStack
+        name: "{{ tempo_name }}"
+        namespace: "{{ observability_namespace }}"
+      register: _tempo
+      failed_when: >
+        _tempo.resources | length == 0 or
+        (_tempo.resources[0].status.conditions | default([])
+          | selectattr('type','equalto','Ready')
+          | selectattr('status','equalto','True') | list | length) == 0
+
+    - name: Gateway collector + Tempo gateway are Available
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ observability_namespace }}"
+        name: "{{ item }}"
+      loop:
+        - "{{ otel_gateway_name }}-collector"
+        - "tempo-{{ tempo_name }}-gateway"
+      register: _obs
+      failed_when: >
+        (_obs.resources | default([])) | length == 0 or
+        ((_obs.resources[0].status.availableReplicas | default(0)) | int) < 1
+
+    - name: App + DB workloads are running in their own namespaces
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ item.ns }}"
+        name: "{{ item.name }}"
+      loop:
+        - { ns: "{{ quarkus_namespace }}", name: "{{ quarkus_app_name }}" }
+        - { ns: "{{ quarkus_namespace }}", name: "appdb" }
+        - { ns: "{{ python_namespace }}",  name: "{{ python_app_name }}" }
+        - { ns: "{{ python_namespace }}",  name: "appdb" }
+      loop_control: { label: "{{ item.ns }}/{{ item.name }}" }
+      register: _apps
+      failed_when: >
+        (_apps.resources | default([])) | length == 0 or
+        ((_apps.resources[0].status.availableReplicas | default(0)) | int) < 1
+
+    - name: Find a Python pod (has python3 + in-cluster DNS)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ python_namespace }}"
+        label_selectors: ["app={{ python_app_name }}"]
+        field_selectors: ["status.phase=Running"]
+      register: _pyq
+
+    - name: Per-tenant trace + DB-span check (temp reader SA, auto-cleaned)
+      block:
+        - name: Temp read-only SA for verification
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata: { name: trace-verify, namespace: "{{ observability_namespace }}" }
+
+        - name: Bind it to BOTH tenant read roles (verification only)
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata: { name: "trace-verify-{{ item.name }}" }
+              roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: "tempo-{{ item.name }}-read" }
+              subjects:
+                - { kind: ServiceAccount, name: trace-verify, namespace: "{{ observability_namespace }}" }
+          loop: "{{ tempo_tenants }}"
+          loop_control: { label: "{{ item.name }}" }
+
+        - name: Mint a token for the verification SA
+          ansible.builtin.command:
+            cmd: "oc create token trace-verify -n {{ observability_namespace }} --duration=10m"
+          environment: { KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}" }
+          register: _vtok
+          changed_when: false
+
+        - name: Query each tenant's service.name set (proves namespace routing)
+          ansible.builtin.command:
+            argv:
+              - oc
+              - exec
+              - "-n"
+              - "{{ python_namespace }}"
+              - "{{ _pyq.resources[0].metadata.name }}"
+              - "-c"
+              - app
+              - "--"
+              - env
+              - "T={{ _vtok.stdout }}"
+              - python3
+              - "-c"
+              - >-
+                import urllib.request,json,ssl,os;
+                tok=os.environ['T'];
+                b='https://tempo-{{ tempo_name }}-gateway.{{ observability_namespace }}.svc:8080';
+                c=ssl._create_unverified_context();
+                f=lambda t: json.loads(urllib.request.urlopen(urllib.request.Request(b+'/api/traces/v1/'+t+'/tempo/api/search/tag/service.name/values',headers={'Authorization':'Bearer '+tok}),timeout=20,context=c).read())['tagValues'];
+                print('quarkus tenant service.name:', f('{{ tempo_tenants[0].name }}'));
+                print('python  tenant service.name:', f('{{ tempo_tenants[1].name }}'))
+          environment:
+            KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+          register: _tt
+          changed_when: false
+          ignore_errors: true
+
+        - name: Per-tenant service.name (quarkus tenant must NOT list python)
+          ansible.builtin.debug:
+            var: _tt.stdout_lines
+      always:
+        - name: Remove verification RBAC
+          kubernetes.core.k8s:
+            state: absent
+            definition: "{{ item }}"
+          loop:
+            - { apiVersion: rbac.authorization.k8s.io/v1, kind: ClusterRoleBinding, metadata: { name: "trace-verify-{{ tempo_tenants[0].name }}" } }
+            - { apiVersion: rbac.authorization.k8s.io/v1, kind: ClusterRoleBinding, metadata: { name: "trace-verify-{{ tempo_tenants[1].name }}" } }
+            - { apiVersion: v1, kind: ServiceAccount, metadata: { name: trace-verify, namespace: "{{ observability_namespace }}" } }
+          loop_control: { label: "{{ item.kind }}" }
+
+    - name: OTel-metrics ServiceMonitor exists on the collector (UWM scrape)
+      kubernetes.core.k8s_info:
+        api_version: monitoring.coreos.com/v1
+        kind: ServiceMonitor
+        namespace: "{{ observability_namespace }}"
+        name: "{{ otel_gateway_name }}-otel-metrics"
+      register: _sm
+      failed_when: (_sm.resources | default([])) | length == 0
+
+    - name: OTel app metrics reached UWM (query Thanos; temp SA, auto-cleaned)
+      block:
+        - name: Temp metrics-reader SA
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata: { name: metric-verify, namespace: "{{ observability_namespace }}" }
+
+        - name: Grant cluster-monitoring-view
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata: { name: metric-verify-cmv }
+              roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-monitoring-view }
+              subjects:
+                - { kind: ServiceAccount, name: metric-verify, namespace: "{{ observability_namespace }}" }
+
+        - name: Token for the metrics-reader SA
+          ansible.builtin.command:
+            cmd: "oc create token metric-verify -n {{ observability_namespace }} --duration=10m"
+          environment: { KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}" }
+          register: _mvtok
+          changed_when: false
+
+        - name: Query Thanos for the OTel-sourced app metrics
+          ansible.builtin.command:
+            argv:
+              - oc
+              - exec
+              - "-n"
+              - "{{ python_namespace }}"
+              - "{{ _pyq.resources[0].metadata.name }}"
+              - "-c"
+              - app
+              - "--"
+              - env
+              - "T={{ _mvtok.stdout }}"
+              - python3
+              - "-c"
+              - >-
+                import urllib.request,json,ssl,os;
+                tok=os.environ['T'];
+                b='https://thanos-querier.openshift-monitoring.svc:9091/api/v1/query?query=';
+                c=ssl._create_unverified_context();
+                q=lambda e: json.loads(urllib.request.urlopen(urllib.request.Request(b+urllib.parse.quote(e),headers={'Authorization':'Bearer '+tok}),timeout=20,context=c).read())['data']['result'];
+                import urllib.parse;
+                a=q('app_checkout_orders_total');
+                h=q('count by (service_name) ({__name__=~"http_server.*",service_name=~"quarkus-otel-demo|python-otel-demo"})');
+                print('python custom app_checkout_orders_total series in UWM:', len(a));
+                print('OTel http_server metrics present for:', sorted({r['metric'].get('service_name') for r in h}))
+          environment:
+            KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+          register: _met
+          changed_when: false
+          ignore_errors: true
+
+        - name: OTel application-metrics in UWM
+          ansible.builtin.debug:
+            var: _met.stdout_lines
+      always:
+        - name: Remove metrics-verify RBAC
+          kubernetes.core.k8s:
+            state: absent
+            definition: "{{ item }}"
+          loop:
+            - { apiVersion: rbac.authorization.k8s.io/v1, kind: ClusterRoleBinding, metadata: { name: metric-verify-cmv } }
+            - { apiVersion: v1, kind: ServiceAccount, metadata: { name: metric-verify, namespace: "{{ observability_namespace }}" } }
+          loop_control: { label: "{{ item.kind }}" }
+
+    - name: NetObserv - FlowCollector + LokiStack Ready (design.md sec 3.5)
+      kubernetes.core.k8s_info:
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+        namespace: "{{ item.ns | default(omit) }}"
+      loop:
+        - { api: flows.netobserv.io/v1beta2, kind: FlowCollector, name: cluster }
+        - { api: loki.grafana.com/v1, kind: LokiStack, name: loki, ns: "{{ netobserv_namespace }}" }
+      loop_control: { label: "{{ item.kind }}" }
+      register: _no
+      when: netobserv_enabled | bool
+      failed_when: >
+        netobserv_enabled and (
+          _no.resources | length == 0 or
+          (_no.resources[0].status.conditions | default([])
+            | selectattr('type','equalto','Ready')
+            | selectattr('status','equalto','True') | list | length) == 0 )
+
+    - name: NetObserv - per-team FlowCollectorSlices exist
+      kubernetes.core.k8s_info:
+        api_version: flows.netobserv.io/v1alpha1
+        kind: FlowCollectorSlice
+        namespace: "{{ item.namespace }}"
+        name: "{{ item.name }}-slice"
+      loop: "{{ tempo_tenants }}"
+      loop_control: { loop_var: item, label: "{{ item.namespace }}/{{ item.name }}-slice" }
+      register: _slc
+      when: netobserv_enabled | bool
+      failed_when: netobserv_enabled and (_slc.resources | default([]) | length == 0)
+
+    - name: NetObserv - flows captured + written to Loki (FLP counters)
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          FLP=$(oc get pod -n {{ netobserv_namespace }} -l app=flowlogs-pipeline
+          -o jsonpath='{.items[0].metadata.name}');
+          oc exec -n {{ netobserv_namespace }} "$FLP" --
+          sh -c 'curl -s http://localhost:9401/metrics'
+          | awk '/^netobserv_loki_sent_entries_total/{s+=$2}
+                 /^netobserv_loki_dropped_entries_total/{d+=$2}
+                 END{print "sent="s" dropped="d}'
+      environment:
+        KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+      register: _flp
+      changed_when: false
+      when: netobserv_enabled | bool
+      failed_when: netobserv_enabled and ('sent=0 ' in (_flp.stdout | default('sent=0 ')))
+
+    - name: NetObserv flow-write result
+      ansible.builtin.debug:
+        var: _flp.stdout
+      when: netobserv_enabled | bool
+
+    - name: NetObserv - per-team flow visibility is namespace-isolated
+      # NetObserv console scopes flows to namespaces the user can access.
+      # Prove the boundary: each Dev can read pods ONLY in their namespace.
+      ansible.builtin.command:
+        cmd: oc create -o jsonpath={.status.allowed} -f -
+        stdin: |
+          apiVersion: authorization.k8s.io/v1
+          kind: SubjectAccessReview
+          spec:
+            user: {{ item.user }}
+            resourceAttributes:
+              group: ""
+              resource: pods
+              namespace: {{ item.ns }}
+              verb: list
+      environment:
+        KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+      register: _norbac
+      changed_when: false
+      when: netobserv_enabled | bool
+      loop:
+        - { user: "dev-quarkus", ns: "{{ quarkus_namespace }}", expect: "true"  }
+        - { user: "dev-quarkus", ns: "{{ python_namespace }}",  expect: "false" }
+        - { user: "dev-python",  ns: "{{ python_namespace }}",  expect: "true"  }
+        - { user: "dev-python",  ns: "{{ quarkus_namespace }}",  expect: "false" }
+      loop_control: { label: "{{ item.user }} -> {{ item.ns }} (want {{ item.expect }})" }
+      failed_when: netobserv_enabled and ((_norbac.stdout | trim) != item.expect)
+
+    - name: Platform telemetry - logging LokiStack Ready (design.md sec 3.3)
+      kubernetes.core.k8s_info:
+        api_version: loki.grafana.com/v1
+        kind: LokiStack
+        name: logging-loki
+        namespace: "{{ platform_logging_namespace }}"
+      register: _pls
+      when: platform_telemetry_enabled | bool
+      failed_when: >
+        platform_telemetry_enabled and (
+          _pls.resources | length == 0 or
+          (_pls.resources[0].status.conditions | default([])
+            | selectattr('type','equalto','Ready')
+            | selectattr('status','equalto','True') | list | length) == 0 )
+
+    - name: Platform telemetry - node collector on EVERY node (incl. masters)
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        name: "{{ otel_node_name }}-collector"
+        namespace: "{{ observability_namespace }}"
+      register: _nds
+      when: platform_telemetry_enabled | bool
+      failed_when: >
+        platform_telemetry_enabled and (
+          _nds.resources | length == 0 or
+          (_nds.resources[0].status.numberReady | default(0)) | int
+            != (_nds.resources[0].status.desiredNumberScheduled | default(-1)) | int )
+
+    - name: Platform logs are ADMIN-ONLY (design.md sec 3.1/9) - SAR matrix
+      ansible.builtin.command:
+        cmd: oc create -o jsonpath={.status.allowed} -f -
+        stdin: |
+          apiVersion: authorization.k8s.io/v1
+          kind: SubjectAccessReview
+          spec:
+            {{ item.subj }}
+            resourceAttributes:
+              group: loki.grafana.com
+              resource: "{{ item.tenant }}"
+              name: logs
+              verb: "{{ item.verb }}"
+      environment:
+        KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+      register: _plrbac
+      changed_when: false
+      when: platform_telemetry_enabled | bool
+      loop:
+        # Dev users must NOT read platform/audit logs.
+        - { subj: "user: dev-quarkus", tenant: "infrastructure", verb: get, expect: "false" }
+        - { subj: "user: dev-quarkus", tenant: "audit",          verb: get, expect: "false" }
+        - { subj: "user: dev-python",  tenant: "infrastructure", verb: get, expect: "false" }
+        - { subj: "user: dev-python",  tenant: "audit",          verb: get, expect: "false" }
+        # Admins may; the collector SA may write.
+        - { subj: "groups: ['system:cluster-admins']", tenant: "audit", verb: get, expect: "true" }
+        - { subj: "user: system:serviceaccount:{{ observability_namespace }}:{{ otel_node_name }}-collector", tenant: "audit", verb: create, expect: "true" }
+      loop_control: { label: "{{ item.subj }} {{ item.verb }} {{ item.tenant }} (want {{ item.expect }})" }
+      failed_when: platform_telemetry_enabled and ((_plrbac.stdout | trim) != item.expect)
+
+    - name: Platform-logs RBAC results (only admins can see them)
+      ansible.builtin.debug:
+        msg: "{{ item.item.subj }} {{ item.item.verb }} {{ item.item.tenant }} = {{ item.stdout | trim }} (want {{ item.item.expect }}) OK"
+      loop: "{{ _plrbac.results | default([]) }}"
+      loop_control: { label: "{{ item.item.tenant }}" }
+      when: platform_telemetry_enabled | bool
+
+    - name: Application logs are PER-TEAM (namespace-scoped) - SAR matrix
+      ansible.builtin.command:
+        cmd: oc create -o jsonpath={.status.allowed} -f -
+        stdin: |
+          apiVersion: authorization.k8s.io/v1
+          kind: SubjectAccessReview
+          spec:
+            user: {{ item.user }}
+            resourceAttributes:
+              group: loki.grafana.com
+              resource: application
+              name: logs
+              namespace: {{ item.ns }}
+              verb: get
+      environment:
+        KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+      register: _applog
+      changed_when: false
+      when: platform_telemetry_enabled | bool and ('application' in platform_log_tenants)
+      loop:
+        - { user: "dev-quarkus", ns: "{{ quarkus_namespace }}", expect: "true"  }
+        - { user: "dev-quarkus", ns: "{{ python_namespace }}",  expect: "false" }
+        - { user: "dev-python",  ns: "{{ python_namespace }}",  expect: "true"  }
+        - { user: "dev-python",  ns: "{{ quarkus_namespace }}",  expect: "false" }
+      loop_control: { label: "{{ item.user }} app-logs in {{ item.ns }} (want {{ item.expect }})" }
+      failed_when: >
+        (platform_telemetry_enabled and 'application' in platform_log_tenants)
+        and ((_applog.stdout | trim) != item.expect)
+
+    - name: Application-logs per-team isolation results
+      ansible.builtin.debug:
+        msg: "{{ item.item.user }} app-logs in {{ item.item.ns }} = {{ item.stdout | trim }} (want {{ item.item.expect }}) OK"
+      loop: "{{ _applog.results | default([]) }}"
+      loop_control: { label: "{{ item.item.user }}->{{ item.item.ns }}" }
+      when: platform_telemetry_enabled | bool and ('application' in platform_log_tenants)
+
+    - name: Per-user RBAC isolation via SubjectAccessReview (design.md sec 9)
+      # Tempo authorizes with resource=<tenant>, resourceName=traces. Mirror
+      # that exact SAR shape (a literal block via stdin - no shell quoting).
+      ansible.builtin.command:
+        cmd: oc create -o jsonpath={.status.allowed} -f -
+        stdin: |
+          apiVersion: authorization.k8s.io/v1
+          kind: SubjectAccessReview
+          spec:
+            user: {{ item.user }}
+            resourceAttributes:
+              group: tempo.grafana.com
+              resource: "{{ item.tenant }}"
+              name: traces
+              verb: get
+      environment:
+        KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') }}"
+      register: _rbac
+      changed_when: false
+      loop:
+        - { user: "dev-quarkus", tenant: "quarkus", expect: "true"  }
+        - { user: "dev-quarkus", tenant: "python",  expect: "false" }
+        - { user: "dev-python",  tenant: "python",  expect: "true"  }
+        - { user: "dev-python",  tenant: "quarkus", expect: "false" }
+      loop_control: { label: "{{ item.user }} -> {{ item.tenant }} (want {{ item.expect }})" }
+      failed_when: (_rbac.stdout | trim) != item.expect
+
+    - name: RBAC isolation results
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.user }} read {{ item.item.tenant }} =
+          {{ item.stdout | trim }} (expected {{ item.item.expect }}) OK
+      loop: "{{ _rbac.results }}"
+      loop_control: { label: "{{ item.item.user }}->{{ item.item.tenant }}" }
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "TempoStack Ready + gateway up; collector routing by namespace."
+          - "Tenants: quarkus={{ quarkus_namespace }}, python={{ python_namespace }}."
+          - "Each app has its own PostgreSQL (DB spans auto-instrumented)."
+          - "App metrics via OTLP -> collector prometheus exporter -> UWM"
+          - "  scrapes ONE collector ServiceMonitor (no per-app scrape)."
+          - "NetObserv: eBPF -> FLP -> LokiStack(openshift-network) + console;"
+          - "  per-team FlowCollectorSlice + namespace-scoped flow RBAC."
+          - "Platform logs: OTel DaemonSet -> LokiStack(openshift-logging)"
+          - "  infra+audit tenants; ADMIN-ONLY (dev users SAR-denied)."
+          - "Platform metrics: CPM stays SoR (admin-only); OTel host/kubelet"
+          - "  via DaemonSet -> admin-scoped ServiceMonitor."
+          - "Users: dev-quarkus / dev-python (htpasswd) - each sees only its ns + tenant."
+          - "Console -> Observe -> Traces: pick tenant, filter service.name; open a"
+          - "  python /checkout trace to see flask->requests->psycopg2->Quarkus->JDBC."

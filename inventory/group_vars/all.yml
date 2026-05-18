@@ -1,0 +1,249 @@
+---
+# =============================================================================
+# Central configuration. Every knob the design.md trace slice needs.
+# Override per-cluster in inventory/host_vars/<name>.yml.
+# =============================================================================
+
+# ---- Namespaces -------------------------------------------------------------
+# Observability plane (Tempo, MinIO, both collectors) is Platform-owned.
+# Each app is its own Dev-owned namespace so RBAC + per-namespace trace
+# tenancy can be demonstrated (design.md sec 1.4 ownership / sec 9 RBAC).
+observability_namespace: "observability"
+quarkus_namespace: "otel-demo-quarkus"
+python_namespace: "otel-demo-python"
+
+# ---- deployment.environment.name (canonical resource attribute, sec 3.3) ----
+otel_environment_name: "demo"
+
+# ---- Operator subscriptions (design.md sec 8 phase 4) -----------------------
+# Red Hat build of OpenTelemetry, Tempo, and Cluster Observability Operator.
+# Channels default to the operators' default channel; pin per cluster if the
+# target OpenShift version requires it (design.md sec 9 "Support status").
+operators:
+  opentelemetry:
+    name: opentelemetry-product
+    channel: stable
+    source: redhat-operators
+    namespace: openshift-opentelemetry-operator
+  tempo:
+    name: tempo-product
+    channel: stable
+    source: redhat-operators
+    namespace: openshift-tempo-operator
+  coo:
+    name: cluster-observability-operator
+    channel: stable
+    source: redhat-operators
+    namespace: openshift-cluster-observability-operator
+operator_csv_wait_timeout: 600
+
+# ---- MinIO (in-cluster S3 backend for TempoStack) ---------------------------
+# Demo backend only. design.md sec 3.4 mandates object-storage-backed Tempo;
+# swap these for ODF/Noobaa or external S3 in host_vars for anything real.
+minio_image: "quay.io/minio/minio:latest"
+minio_mc_image: "quay.io/minio/mc:latest"
+minio_root_user: "tempo"
+minio_root_password: "tempo-demo-secret-change-me"
+minio_bucket: "tempo-traces"
+minio_storage_size: "20Gi"
+minio_storage_class: ""          # "" = cluster default StorageClass
+
+# ---- Network Observability (design.md sec 3.5) ------------------------------
+# Loki Operator + LokiStack (tenant mode openshift-network) backed by the
+# SAME demo MinIO (new bucket). NetObserv Operator + cluster-wide
+# FlowCollector; per-namespace FlowCollectorSlices + namespace-scoped
+# reader RBAC give each Dev team flows for ONLY their namespace.
+netobserv_enabled: true
+netobserv_namespace: "netobserv"
+netobserv_loki_bucket: "netobserv-loki"
+netobserv_loki_size: "1x.demo"          # smallest LokiStack t-shirt size
+netobserv_loki_storage_size: "10Gi"
+netobserv_loki_storage_class: ""        # "" = cluster default
+netobserv_operators:
+  loki:
+    name: loki-operator
+    channel: stable-6.5                  # 6.x => openshift-network tenancy
+    source: redhat-operators
+    namespace: openshift-operators-redhat
+  netobserv:
+    name: netobserv-operator
+    channel: stable
+    source: redhat-operators
+    namespace: openshift-netobserv-operator
+# eBPF agent sampling. 1 = every flow, but on a multi-node cluster that
+# exceeds the 1x.demo LokiStack per-tenant ingestion limit (429s / dropped
+# flows). 50 keeps volume well under the limit while still showing rich
+# topology (design.md sec 3.5 references sampling as the volume control).
+netobserv_sampling: 50
+# Per-slice sampling the project-admin "owns" for their team (design.md
+# sec 3.5: AlwaysCollect => Platform collects globally, slices tune per ns).
+netobserv_slice_sampling: 50
+# LokiStack per-tenant ingestion headroom (MB/s) for the network tenant -
+# 1x.demo defaults are tiny; raise so flows are not rate-limited.
+netobserv_loki_ingestion_mb: 25
+netobserv_loki_ingestion_burst_mb: 35
+
+# ---- TempoStack (design.md sec 3.4) -----------------------------------------
+tempo_name: "demo"
+tempo_storage_size: "10Gi"
+tempo_storage_class: ""
+# Hot trace retention. design.md sec 4.1 / 6.2: 7-30d hot; trends as metrics.
+tempo_retention: "168h"          # 7 days
+tempo_resources_total_limit_memory: "2Gi"
+tempo_resources_total_limit_cpu: "2000m"
+# Expose the Jaeger query UI via a Route (per-cluster break-glass view).
+tempo_expose_route: true
+# Multitenant gateway (tenants.mode=openshift). ONE TENANT PER APP NAMESPACE
+# so each Dev user reads only their own traces (design.md sec 9 RBAC). The
+# gateway collector routes spans by k8s.namespace.name into these tenants.
+tempo_tenants:
+  - name: "quarkus"
+    id: "1610b0c3-c509-4592-a256-a1871353dbd5"
+    namespace: "{{ quarkus_namespace }}"
+    reader_user: "dev-quarkus"
+  - name: "python"
+    id: "2c7f1a44-9b02-4d61-8e3a-7d6b2f0c4e91"
+    namespace: "{{ python_namespace }}"
+    reader_user: "dev-python"
+
+# ---- Scoped Dev users (htpasswd IDP) ----------------------------------------
+# Each user gets edit on ONE app namespace + read on ONLY that app's Tempo
+# tenant. Proves the design.md sec 9 per-tenant RBAC isolation.
+users_idp_name: "demo-htpasswd"
+users:
+  - { name: "dev-quarkus", password: "dev-quarkus-demo", namespace: "{{ quarkus_namespace }}" }
+  - { name: "dev-python",  password: "dev-python-demo",  namespace: "{{ python_namespace }}" }
+
+# ---- Platform logs & metrics via OpenTelemetry (design.md sec 3.1/3.3) ------
+# design correction: platform METRICS' system of record is Core Platform
+# Monitoring (already admin-only via cluster-monitoring-view); we do NOT
+# re-collect them. The OTel slice is the DaemonSet's host/kubelet metrics
+# (admin-only Platform ServiceMonitor) + infra/audit LOGS to a SEPARATE
+# LokiStack in tenant mode openshift-logging. Admin-only = tenant RBAC.
+platform_telemetry_enabled: true
+platform_logging_namespace: "platform-logging"
+platform_loki_bucket: "platform-logs"
+platform_loki_size: "1x.demo"
+platform_loki_storage_size: "10Gi"
+platform_loki_storage_class: ""          # "" = cluster default
+platform_loki_ingestion_mb: 25
+platform_loki_ingestion_burst_mb: 35
+# Log tenants the OTel DaemonSet feeds. infra+audit are ADMIN-ONLY;
+# application is per-namespace Dev (each team sees only its own ns).
+platform_log_tenants: ["infrastructure", "audit", "application"]
+# The app namespaces: EXCLUDED from infrastructure, and the ONLY sources
+# for the application tenant. Each maps to its Dev reader_user.
+platform_app_namespaces:
+  - { ns: "{{ quarkus_namespace }}", user: "dev-quarkus" }
+  - { ns: "{{ python_namespace }}",  user: "dev-python" }
+# (kept for the infra filelog exclude expression)
+platform_infra_exclude_namespaces:
+  - "{{ quarkus_namespace }}"
+  - "{{ python_namespace }}"
+# Host audit log paths (require privileged DaemonSet - design.md sec 3.3
+# "increases privilege"). Read via the /hostfs mount.
+platform_audit_paths:
+  - "/hostfs/var/log/audit/audit.log"
+  - "/hostfs/var/log/kube-apiserver/audit*.log"
+  - "/hostfs/var/log/openshift-apiserver/audit*.log"
+  - "/hostfs/var/log/oauth-apiserver/audit*.log"
+# Group whose members may read infra/audit log tenants. Dev users are
+# NEVER bound here -> "only admins can see them". cluster-admins already
+# have * ; this also lets named platform operators read without full admin.
+platform_logs_admin_group: "system:cluster-admins"
+# kubelet read-only stats endpoint port.
+platform_kubeletstats_port: 10250
+# Node-collector prometheus exporter port (host/kubelet metrics).
+otel_node_metrics_port: 8889
+# Console Logs view schema. One log source (OTel DaemonSet via OTLP);
+# this is only the plugin's LogQL query TEMPLATE. The stored stream
+# labels are OTEL-style (k8s_namespace_name, log_type), so "otel" is the
+# correct schema - it generates k8s_namespace_name for namespace filters.
+# "viaq" only appeared to work because log_type (tenant) is the one label
+# both schemas share; viaq's kubernetes_namespace_name does not exist here.
+platform_logs_ui_schema: "otel"
+
+# ---- Gateway collector: Deployment mode (design.md sec 3.3) -----------------
+# THE trace path. Workload SDKs -> here -> tail-sampling + enrichment -> Tempo.
+otel_gateway_name: "gateway"
+otel_gateway_replicas: 2
+# Port the collector's prometheus exporter listens on (app metrics path).
+otel_gateway_metrics_port: 8889
+otel_gateway_resources:
+  limits:   { cpu: "1", memory: "1Gi" }
+  requests: { cpu: "250m", memory: "256Mi" }
+
+# Tail-sampling policy. Tail-based so the whole trace is seen before deciding
+# (design.md sec 3.3 "tail-sampling"; sec 4.1 "sampling/retention for critical
+# services"). Keep all errors + all slow traces, sample the rest.
+otel_tailsampling:
+  decision_wait_s: 10
+  num_traces: 100000
+  expected_new_traces_per_sec: 200
+  # Latency (ms) above which a trace is always kept.
+  slow_latency_ms: 500
+  # Baseline probabilistic sampling for "normal" fast/healthy traces.
+  baseline_percent: 10
+
+# ---- Node collector: DaemonSet mode (design.md sec 3.3) ---------------------
+# Node-local ONLY (host metrics / log tailing). Privileged + higher footprint,
+# so it is OPT-IN and is NOT on the trace path. filelog is disabled by default
+# because the design forbids two log collectors against the same source.
+otel_daemonset_enabled: true
+otel_node_name: "node"
+otel_node_hostmetrics_interval_s: 30
+otel_node_filelog_enabled: false   # see design.md sec 3.3 logs guidance
+otel_node_resources:
+  limits:   { cpu: "500m", memory: "512Mi" }
+  requests: { cpu: "100m", memory: "128Mi" }
+
+# ---- Instrumentation CR (design.md sec 3.3 auto-inject) ---------------------
+# Python is auto-injected via the Instrumentation CR. Quarkus uses its own
+# OTel extension (manual SDK) - the design's "unsupported runtime combination
+# uses manual SDK instrumentation" path - so the Java agent is NOT auto-injected
+# into it (the Quarkus runtime + javaagent combo is not recommended).
+instrumentation_name: "demo-instrumentation"
+# Sampler at the SDK edge: parentbased_traceidratio. Head ratio is generous
+# because the real sampling decision is tail-based at the gateway.
+instrumentation_sampler_arg: "1.0"
+
+# ---- PostgreSQL (one per app; OTel DB spans) --------------------------------
+# sclorg image is public (no registry auth). DB calls are auto-instrumented:
+# Quarkus via quarkus.datasource.jdbc.telemetry, Python via psycopg2 OTel.
+postgres_image: "quay.io/sclorg/postgresql-15-c9s:latest"
+postgres_storage_size: "1Gi"
+postgres_db: "appdb"
+postgres_user: "appuser"
+postgres_password: "appdb-demo-secret"
+
+# ---- Workload: Quarkus (primary; custom app, manual SDK) --------------------
+# Custom app embedded in roles/workload_quarkus/files/quarkus-app: REST +
+# Hibernate Panache + PostgreSQL + quarkus-opentelemetry + Micrometer
+# (/q/metrics) + smallrye-health. Built on-cluster via BINARY S2I.
+quarkus_app_name: "quarkus-otel-demo"
+quarkus_service_version: "1.0.0"
+quarkus_builder_image: "registry.access.redhat.com/ubi9/openjdk-21:latest"
+quarkus_replicas: 1
+quarkus_expose_route: true
+quarkus_route_path: "/api/products"
+
+# ---- Workload: Python (secondary; auto-injected SDK) ------------------------
+# Multi-endpoint Flask chain: /checkout -> /inventory -> psycopg2 (own DB)
+# -> cross-namespace call to the Quarkus price API. /metrics via
+# prometheus_client. Source in a ConfigMap (operator auto-injects the SDK).
+python_app_name: "python-otel-demo"
+python_service_version: "1.0.0"
+python_base_image: "registry.access.redhat.com/ubi9/python-312:latest"
+python_replicas: 1
+python_expose_route: true
+python_pip_index_url: "https://pypi.org/simple"
+
+# ---- User Workload Monitoring (design.md sec 3.2) ---------------------------
+# Dev-owned app metrics: enable UWM, then a ServiceMonitor per app namespace
+# scrapes the apps' Prometheus endpoints (Quarkus /q/metrics, Python /metrics).
+uwm_enabled: true
+
+# ---- Load generator (drives the multi-hop trace + DB spans) -----------------
+loadgen_enabled: true
+loadgen_image: "registry.access.redhat.com/ubi9/ubi-minimal:latest"
+loadgen_interval_s: 5

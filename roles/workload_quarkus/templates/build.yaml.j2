@@ -1,0 +1,33 @@
+---
+# Primary workload: a custom Quarkus app (REST + Hibernate Panache +
+# PostgreSQL + quarkus-opentelemetry + Micrometer). MANUAL SDK
+# instrumentation (design.md sec 3.3) configured via OTEL_*/QUARKUS_* env.
+# Built on-cluster from in-repo source via a BINARY S2I build.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: {{ quarkus_app_name }}
+  namespace: {{ quarkus_namespace }}
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: {{ quarkus_app_name }}
+  namespace: {{ quarkus_namespace }}
+spec:
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: DockerImage
+        name: "{{ quarkus_builder_image }}"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: "{{ quarkus_app_name }}:latest"

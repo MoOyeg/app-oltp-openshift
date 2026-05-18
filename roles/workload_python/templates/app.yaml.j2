@@ -1,0 +1,87 @@
+---
+# Secondary workload: a multi-endpoint Flask service. ZERO OTel code -
+# tracing is added entirely by the OTel Operator auto-injection
+# (design.md sec 3.3). The /checkout chain produces a deep, cross-namespace
+# trace:  flask(/checkout) -> requests(/inventory) -> psycopg2(its own DB)
+#         -> requests -> Quarkus /api/price (other namespace + its DB).
+# Flask, requests AND psycopg2 are all auto-instrumented, so HTTP and DB
+# spans nest automatically. /metrics is a Prometheus endpoint for UWM.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ python_app_name }}-src
+  namespace: {{ python_namespace }}
+data:
+  app.py: |
+    import os, time, random
+    import psycopg2
+    import requests
+    from flask import Flask, jsonify
+    # OpenTelemetry metrics API (the OTel Operator auto-instrumentation
+    # provides the SDK + OTLP meter provider). A custom business counter
+    # demonstrates app metrics over OTLP - no prometheus_client / scrape.
+    from opentelemetry import metrics
+    _meter = metrics.get_meter("{{ python_app_name }}")
+    ORDERS = _meter.create_counter(
+        "app.checkout.orders", description="checkout orders placed")
+
+    app = Flask(__name__)
+
+    PRICE_API = ("http://{{ quarkus_app_name }}.{{ quarkus_namespace }}.svc:8080"
+                 "/api/price/{sku}")
+    SELF = "http://{{ python_app_name }}.{{ python_namespace }}.svc:8080"
+    SKUS = ["WIDGET-1", "GADGET-2", "GIZMO-3", "SPROCK-4", "COG-5"]
+
+    def db():
+        return psycopg2.connect(
+            host=os.environ["DB_HOST"], dbname=os.environ["DB_NAME"],
+            user=os.environ["DB_USER"], password=os.environ["DB_PASSWORD"])
+
+    def init_db():
+        for _ in range(30):
+            try:
+                c = db(); cur = c.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS inventory("
+                            "sku TEXT PRIMARY KEY, qty INT)")
+                cur.execute("CREATE TABLE IF NOT EXISTS orders("
+                            "id SERIAL PRIMARY KEY, sku TEXT, ts TIMESTAMP DEFAULT now())")
+                for s in SKUS:
+                    cur.execute("INSERT INTO inventory(sku,qty) VALUES(%s,%s) "
+                                "ON CONFLICT (sku) DO NOTHING", (s, 100))
+                c.commit(); cur.close(); c.close(); return
+            except Exception as e:
+                print("db init retry:", e); time.sleep(3)
+
+    @app.route("/")
+    def index():
+        return jsonify(service="{{ python_app_name }}", status="ok")
+
+    @app.route("/inventory")
+    def inventory():
+        c = db(); cur = c.cursor()
+        cur.execute("SELECT sku, qty FROM inventory ORDER BY sku")
+        rows = cur.fetchall(); cur.close(); c.close()
+        return jsonify(inventory=[{"sku": r[0], "qty": r[1]} for r in rows])
+
+    @app.route("/checkout")
+    def checkout():
+        sku = random.choice(SKUS)
+        # 1) downstream HTTP to our own /inventory (deep span tree)
+        inv = requests.get(f"{SELF}/inventory", timeout=5).json()
+        # 2) record the order in our OWN database (psycopg2 span)
+        c = db(); cur = c.cursor()
+        cur.execute("INSERT INTO orders(sku) VALUES(%s) RETURNING id", (sku,))
+        oid = cur.fetchone()[0]
+        cur.execute("UPDATE inventory SET qty = qty - 1 WHERE sku=%s", (sku,))
+        c.commit(); cur.close(); c.close()
+        # 3) cross-namespace call to the Quarkus price API (its tenant)
+        pr = requests.get(PRICE_API.format(sku=sku), timeout=5)
+        price = pr.json() if pr.status_code == 200 else {"error": pr.status_code}
+        # custom OTel metric -> OTLP -> gateway collector
+        ORDERS.add(1, {"sku": sku, "upstream.status": str(pr.status_code)})
+        return jsonify(order_id=oid, sku=sku, price=price,
+                       inventory_lines=len(inv["inventory"]))
+
+    init_db()
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080)

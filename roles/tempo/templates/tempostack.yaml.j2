@@ -1,0 +1,52 @@
+---
+# design.md sec 3.4: Tempo Operator -> TempoStack (object-storage backed
+# trace store). Hot-trace retention is bounded per sec 4.1 (7-30d hot;
+# long-term trends live as metrics, not raw spans).
+#
+# The multitenant gateway is enabled with tenants.mode=openshift so the COO
+# distributed-tracing console plugin (design.md sec 3.4) can discover and
+# query this stack via OpenShift authn/authz. ONE TENANT PER APP NAMESPACE
+# ({% for t in tempo_tenants %}{{ t.name }}{{ ", " if not loop.last }}{% endfor %}); the gateway collector routes spans by
+# k8s.namespace.name and each Dev user reads only their tenant (sec 9).
+apiVersion: tempo.grafana.com/v1alpha1
+kind: TempoStack
+metadata:
+  name: {{ tempo_name }}
+  namespace: {{ observability_namespace }}
+spec:
+  storage:
+    secret:
+      name: tempo-s3
+      type: s3
+  storageSize: {{ tempo_storage_size }}
+{% if tempo_storage_class %}
+  storageClassName: {{ tempo_storage_class }}
+{% endif %}
+  retention:
+    global:
+      traces: {{ tempo_retention }}
+  resources:
+    total:
+      limits:
+        memory: {{ tempo_resources_total_limit_memory }}
+        cpu: {{ tempo_resources_total_limit_cpu }}
+  tenants:
+    mode: openshift
+    authentication:
+{% for t in tempo_tenants %}
+      - tenantName: {{ t.name }}
+        tenantId: {{ t.id }}
+{% endfor %}
+  template:
+    queryFrontend:
+      jaegerQuery:
+        # Served THROUGH the multitenant gateway (OpenShift authn). The
+        # webhook forbids a separate jaegerQuery ingress when the gateway
+        # is enabled, so the Route is on the gateway below.
+        enabled: true
+    gateway:
+      enabled: true
+{% if tempo_expose_route %}
+      ingress:
+        type: route
+{% endif %}

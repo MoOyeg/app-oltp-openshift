@@ -1,0 +1,37 @@
+---
+# site.yml - full end-to-end build, in the order mandated by design.md.
+#
+# Phase 4 of the design "Build sequence" (Logs & traces): Tempo Operator +
+# OTel Operator/Instrumentation + relevant COO UI plugins. This repo
+# implements the trace slice of that phase end-to-end:
+#
+#   workload SDKs --OTLP--> Deployment gateway collector
+#       (tail-sampling + k8sattributes/resource enrichment)
+#       --OTLP--> TempoStack  (MinIO S3 backend)  --> distributed-tracing UIPlugin
+#
+#   DaemonSet collector: node-local host metrics only (privileged, opt-in).
+#
+# Plus: 2 app namespaces (one Tempo tenant each), 2 scoped Dev users
+# (htpasswd IdP, RBAC isolation per design.md sec 9), a PostgreSQL per app
+# (auto-instrumented DB spans), and User Workload Monitoring (sec 3.2).
+- name: OpenTelemetry -> Tempo demonstration (design.md sec 3.3 / 3.4 / 3.2 / 9)
+  hosts: cluster
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ lookup('env', 'KUBECONFIG') }}"
+  roles:
+    - { role: operators,          tags: ['operators'] }
+    - { role: uwm,                tags: ['uwm', 'monitoring'], when: uwm_enabled | bool }
+    - { role: minio,              tags: ['minio', 'storage'] }
+    - { role: tempo,              tags: ['tempo'] }
+    - { role: loki,               tags: ['netobserv', 'loki'], when: netobserv_enabled | bool }
+    - { role: netobserv,          tags: ['netobserv'], when: netobserv_enabled | bool }
+    - { role: platform_loki,      tags: ['platform', 'logs'], when: platform_telemetry_enabled | bool }
+    - { role: otel_gateway,       tags: ['otel', 'gateway'] }
+    - { role: otel_node,          tags: ['otel', 'daemonset', 'platform'], when: otel_daemonset_enabled | bool }
+    - { role: instrumentation,    tags: ['otel', 'instrumentation'] }
+    - { role: postgres,           tags: ['db', 'postgres'] }
+    - { role: workload_quarkus,   tags: ['workloads', 'quarkus'] }
+    - { role: workload_python,    tags: ['workloads', 'python'] }
+    - { role: users,              tags: ['users', 'rbac'] }

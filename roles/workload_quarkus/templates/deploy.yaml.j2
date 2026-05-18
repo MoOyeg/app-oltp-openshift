@@ -1,0 +1,90 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ quarkus_app_name }}
+  namespace: {{ quarkus_namespace }}
+  labels:
+    app: {{ quarkus_app_name }}
+spec:
+  replicas: {{ quarkus_replicas }}
+  selector:
+    matchLabels:
+      app: {{ quarkus_app_name }}
+  template:
+    metadata:
+      labels:
+        app: {{ quarkus_app_name }}
+    spec:
+      containers:
+        - name: app
+          image: "image-registry.openshift-image-registry.svc:5000/{{ quarkus_namespace }}/{{ quarkus_app_name }}:latest"
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            # ---- OTLP -> gateway collector (NOT direct to Tempo) ----
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://{{ otel_gateway_name }}-collector.{{ observability_namespace }}.svc:4317"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            - name: QUARKUS_OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://{{ otel_gateway_name }}-collector.{{ observability_namespace }}.svc:4317"
+            - name: QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://{{ otel_gateway_name }}-collector.{{ observability_namespace }}.svc:4317"
+            # Canonical join fields (design.md sec 3.3 / sec 9). QUARKUS_OTEL_
+            # RESOURCE_ATTRIBUTES has highest precedence for service.name.
+            - name: OTEL_SERVICE_NAME
+              value: "{{ quarkus_app_name }}"
+            - name: QUARKUS_OTEL_RESOURCE_ATTRIBUTES
+              value: "service.name={{ quarkus_app_name }},service.namespace={{ quarkus_namespace }},service.version={{ quarkus_service_version }},deployment.environment.name={{ otel_environment_name }}"
+            # ---- Datasource (its own namespace's Postgres) ----
+            - name: QUARKUS_DATASOURCE_JDBC_URL
+              value: "jdbc:postgresql://appdb.{{ quarkus_namespace }}.svc:5432/{{ postgres_db }}"
+            - name: QUARKUS_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: appdb, key: database-user } }
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: appdb, key: database-password } }
+          readinessProbe:
+            httpGet: { path: /q/health/ready, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /q/health/live, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            limits: { cpu: "1", memory: 768Mi }
+            requests: { cpu: 100m, memory: 384Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ quarkus_app_name }}
+  namespace: {{ quarkus_namespace }}
+  labels:
+    app: {{ quarkus_app_name }}
+spec:
+  selector:
+    app: {{ quarkus_app_name }}
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+# No ServiceMonitor: app metrics now leave via OTLP to the gateway
+# collector (design.md sec 3.3 "collect once, then route deliberately"),
+# which exposes a single Prometheus endpoint for UWM to scrape.
+{% if quarkus_expose_route %}
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ quarkus_app_name }}
+  namespace: {{ quarkus_namespace }}
+spec:
+  path: "{{ quarkus_route_path }}"
+  to:
+    kind: Service
+    name: {{ quarkus_app_name }}
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+{% endif %}

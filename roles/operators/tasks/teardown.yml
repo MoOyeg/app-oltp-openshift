@@ -1,0 +1,30 @@
+---
+# Remove Subscriptions + the CSVs they installed + the OperatorGroups.
+- name: Delete Subscriptions
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ op.name }}"
+    namespace: "{{ op.namespace }}"
+  loop: "{{ [operators.opentelemetry, operators.tempo, operators.coo] }}"
+  loop_control: { loop_var: op }
+
+- name: Find installed CSVs
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ op.namespace }}"
+  register: _csvs
+  loop: "{{ [operators.opentelemetry, operators.tempo, operators.coo] }}"
+  loop_control: { loop_var: op }
+
+- name: Delete installed CSVs
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ csv.metadata.name }}"
+    namespace: "{{ csv.metadata.namespace }}"
+  loop: "{{ _csvs.results | map(attribute='resources') | flatten }}"
+  loop_control: { loop_var: csv, label: "{{ csv.metadata.name }}" }

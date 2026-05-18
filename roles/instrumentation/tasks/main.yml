@@ -1,0 +1,16 @@
+---
+- name: Create the Instrumentation CR (design.md sec 3.3 auto-inject path)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'instrumentation.yaml.j2') }}"
+
+- name: Confirm the Instrumentation CR is registered
+  kubernetes.core.k8s_info:
+    api_version: opentelemetry.io/v1alpha1
+    kind: Instrumentation
+    name: "{{ instrumentation_name }}"
+    namespace: "{{ python_namespace }}"
+  register: _instr
+  retries: 12
+  delay: 5
+  until: _instr.resources | length > 0

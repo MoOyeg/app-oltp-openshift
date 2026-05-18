@@ -1,0 +1,12 @@
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: {{ op.name }}
+  namespace: {{ op.namespace }}
+spec:
+  channel: {{ op.channel }}
+  name: {{ op.name }}
+  source: {{ op.source }}
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

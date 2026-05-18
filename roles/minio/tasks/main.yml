@@ -1,0 +1,46 @@
+---
+- name: Deploy MinIO (demo S3 backend for Tempo - design.md sec 3.4)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'minio.yaml.j2') }}"
+
+- name: Wait for MinIO to be Available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: minio
+    namespace: "{{ observability_namespace }}"
+  register: _minio
+  retries: 30
+  delay: 10
+  until: >
+    _minio.resources | length > 0 and
+    (_minio.resources[0].status.availableReplicas | default(0)) | int >= 1
+
+- name: Delete any prior bucket-create job (Jobs are immutable)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: batch/v1
+    kind: Job
+    name: minio-make-bucket
+    namespace: "{{ observability_namespace }}"
+    wait: true
+    wait_timeout: 120
+
+- name: Create the Tempo bucket
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'bucket-job.yaml.j2') }}"
+
+- name: Wait for bucket-create job to complete
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: Job
+    name: minio-make-bucket
+    namespace: "{{ observability_namespace }}"
+  register: _job
+  retries: 30
+  delay: 10
+  until: >
+    _job.resources | length > 0 and
+    (_job.resources[0].status.succeeded | default(0)) | int >= 1

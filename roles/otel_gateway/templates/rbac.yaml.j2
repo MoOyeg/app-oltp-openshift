@@ -1,0 +1,36 @@
+---
+# The k8sattributes processor needs to read pods/namespaces/replicasets
+# cluster-wide to resolve k8s.* resource attributes (design.md sec 3.3
+# canonical join fields). The OTel Operator auto-creates the collector
+# ServiceAccount as "<name>-collector"; we bind a least-privilege
+# read-only ClusterRole to it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ otel_gateway_name }}-collector
+  namespace: {{ observability_namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ otel_gateway_name }}-otel-k8sattributes
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ otel_gateway_name }}-otel-k8sattributes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ otel_gateway_name }}-otel-k8sattributes
+subjects:
+  - kind: ServiceAccount
+    name: {{ otel_gateway_name }}-collector
+    namespace: {{ observability_namespace }}

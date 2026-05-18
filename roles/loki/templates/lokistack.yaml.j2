@@ -1,0 +1,49 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ netobserv_namespace }}
+---
+# S3 creds for the SAME demo MinIO (new bucket). Loki Operator s3 schema.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: loki-s3
+  namespace: {{ netobserv_namespace }}
+type: Opaque
+stringData:
+  endpoint: "http://minio.{{ observability_namespace }}.svc:9000"
+  bucketnames: "{{ netobserv_loki_bucket }}"
+  access_key_id: "{{ minio_root_user }}"
+  access_key_secret: "{{ minio_root_password }}"
+  region: "us-east-1"
+---
+# design.md sec 3.5: tenant mode openshift-network is what makes per-Dev
+# namespace flow RBAC possible (Loki Operator 6.x).
+apiVersion: loki.grafana.com/v1
+kind: LokiStack
+metadata:
+  name: loki
+  namespace: {{ netobserv_namespace }}
+spec:
+  size: {{ netobserv_loki_size }}
+  storage:
+    schemas:
+      - version: v13
+        effectiveDate: "2024-01-01"
+    secret:
+      name: loki-s3
+      type: s3
+  storageClassName: {{ _netobserv_loki_sc }}
+  tenants:
+    mode: openshift-network
+  # 1x.demo per-tenant ingestion is tiny; raise it so NetObserv flows
+  # are not 429-dropped (design.md sec 3.5 expects flows to land).
+  limits:
+    global:
+      ingestion:
+        ingestionRate: {{ netobserv_loki_ingestion_mb }}
+        ingestionBurstSize: {{ netobserv_loki_ingestion_burst_mb }}
+        perStreamRateLimit: {{ netobserv_loki_ingestion_mb }}
+        perStreamRateLimitBurst: {{ netobserv_loki_ingestion_burst_mb }}
+  managementState: Managed

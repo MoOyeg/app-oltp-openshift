@@ -1,0 +1,5 @@
+# All work targets the local API endpoint via the kubernetes.core modules,
+# so the play runs against localhost. Per-cluster overrides live in
+# inventory/host_vars/<name>.yml (see cluster.yml.example).
+[cluster]
+cluster ansible_connection=local

@@ -1,0 +1,49 @@
+{% for t in tempo_tenants %}
+---
+# Project-admin-owned, namespace-scoped slice (design.md sec 3.5). With the
+# global FlowCollector at AlwaysCollect, the slice tunes per-team
+# sampling/enrichment for ONLY {{ t.namespace }}.
+apiVersion: flows.netobserv.io/v1alpha1
+kind: FlowCollectorSlice
+metadata:
+  name: {{ t.name }}-slice
+  namespace: {{ t.namespace }}
+spec:
+  collectionMode: AlwaysCollect
+  sampling: {{ netobserv_slice_sampling }}
+---
+# design.md sec 3.5 per-Dev flow RBAC: bind the NetObserv flow + metrics
+# reader ClusterRoles as NAMESPACE-scoped RoleBindings so {{ t.reader_user }}
+# sees flows for ONLY {{ t.namespace }} (internal + where it is src/dst),
+# never unrelated tenant traffic.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ t.reader_user }}-netobserv-loki-reader
+  namespace: {{ t.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  # Operator-provided flow (Loki network tenant) reader - exact design.md
+  # sec 3.5 name. Namespace-scoped binding => the NetObserv console shows
+  # {{ t.reader_user }} flows for ONLY {{ t.namespace }}.
+  name: netobserv-loki-reader
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ t.reader_user }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ t.reader_user }}-netobserv-metrics-reader
+  namespace: {{ t.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: netobserv-metrics-reader
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ t.reader_user }}
+{% endfor %}
