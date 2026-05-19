@@ -124,6 +124,12 @@ Two htpasswd users are created (passwords in `group_vars`, change them):
    LokiStack(`openshift-network`); a per-team `FlowCollectorSlice` plus
    namespace-scoped `netobserv-loki-reader`/`netobserv-metrics-reader`
    enforce the split (design.md §3.5).
+   **Developer-perspective requirement:** to use the *Developer →
+   Observe → Network Traffic* view, the user must have the
+   **`netobserv-reader` cluster role** *and* the
+   **`netobserv-metrics-reader` namespace role**. Without both, the
+   Developer view is empty/inaccessible even if Admin-perspective
+   Network Traffic works for the same user.
 6. Platform + app logs (Observe → Logs): the privileged OTel DaemonSet
    feeds a separate `openshift-logging` LokiStack — `infrastructure` +
    `audit` are **admin-only** (`dev-*` SAR-denied; only cluster-admins),

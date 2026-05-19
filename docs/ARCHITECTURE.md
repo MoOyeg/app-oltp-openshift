@@ -88,6 +88,7 @@ Same per-namespace/per-user model as traces, applied to flows.
 | Platform-owned collection | `roles/netobserv`: NetObserv Operator + cluster-wide `FlowCollector` (eBPF agent DaemonSet → flowlogs-pipeline → LokiStack + Prometheus + console plugin). Dev teams don't edit it. |
 | Per-team scoping | `spec.processor.slicesConfig.enable: true` + `AlwaysCollect`: Platform collects cluster-wide; a **`FlowCollectorSlice`** per team namespace tunes that team's sampling/enrichment. |
 | Per-team flow RBAC | Namespace-scoped RoleBindings of the operator ClusterRoles **`netobserv-loki-reader`** (flows) + **`netobserv-metrics-reader`** (metrics) to `dev-quarkus`/`dev-python`. The NetObserv console filters flows to namespaces the user can access — proven by SAR: each Dev can `list pods` only in their own namespace. |
+| **Developer perspective requirement** | To use **Developer → Observe → Network Traffic** in the OpenShift console, the user must have the **`netobserv-reader` cluster role** *and* the **`netobserv-metrics-reader` namespace role**. Without both, the Developer-perspective view will be empty/inaccessible even when the Admin-perspective Network Traffic view works for the same user. |
 | Verified | FLP counters `netobserv_loki_sent_entries_total > 0`, `dropped == 0` (flows captured + written); `validate.yml` checks FlowCollector/LokiStack Ready, slices, FLP counters, and the 4-way namespace SAR. |
 
 ### Platform logs & metrics via OpenTelemetry (design.md §3.1 / §3.3)
