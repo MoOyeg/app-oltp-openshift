@@ -53,6 +53,27 @@ LokiStack, **admin-only**), and **§9** (per-namespace/per-tenant RBAC
 isolation across traces, metric labels, flows, and admin-only platform
 logs). RHACM rollup / Datadog remain out of scope — see `design.md`.
 
+## How OpenTelemetry obtains each signal
+
+Two collection roles do all the work: the **Deployment gateway collector**
+(the app trace/metric path) and the **DaemonSet node collector** (node-local
+host/kubelet metrics + log tailing). The gateway enriches (`k8sattributes`,
+`resource`), routes by namespace, tail-samples, then exports — to TempoStack
+for traces and a Prometheus endpoint (UWM-scraped) for metrics. The
+DaemonSet ships logs OTLP to the `openshift-logging` LokiStack.
+
+| Signal | Application workloads (otel-demo-*) | Platform |
+|---|---|---|
+| **Traces** | Quarkus: build-time SDK via `quarkus-opentelemetry` extension → OTLP/gRPC :4317 to gateway. Python: OTel Operator `Instrumentation` CR auto-injects an init container that sets `PYTHONPATH`, so `sitecustomize` loads the SDK and monkey-patches Flask/requests/psycopg2 at import — OTLP/HTTP :4318 to gateway. | None — OpenShift platform components don't emit OTLP traces. |
+| **Metrics** | Quarkus: `quarkus-micrometer-opentelemetry` bridge maps Micrometer (JVM + HTTP) meters to OTel → OTLP to gateway. Python: auto-instrumentation `OTEL_METRICS_EXPORTER=otlp` for HTTP/runtime + a custom OTel Meter counter (`app.checkout.orders`) → OTLP to gateway. Gateway re-exposes them on a Prometheus endpoint UWM scrapes. | **CPM remains the SoR** (admin-only); not re-collected via OTel. Supplementary OTel slice: DaemonSet `hostmetrics` (`/hostfs`) + `kubeletstats` (kubelet `/stats/summary`) → collector Prometheus endpoint scraped by an **admin-scoped** ServiceMonitor. |
+| **Logs** | Apps log to stdout/stderr. The DaemonSet's `filelog/app` tails `/hostfs/var/log/pods/{otel-demo-*}/.../*.log` (CRI-O parser → `k8s.namespace.name`/`k8s.pod.name` labels), stamps `log_type=application`, exports OTLP to LokiStack `application` tenant — visible per-team. | DaemonSet `filelog/infra` (all pods **excluding** app namespaces) + `filelog/audit` (`/var/log/audit/*` and kube/openshift/oauth-apiserver audit, masters via `tolerations: Exists`) → `infrastructure` / `audit` tenants of the same `openshift-logging` LokiStack — **admin-only**. |
+
+Common downstream: SDKs/agents never write to Tempo or Loki directly — they
+always emit OTLP to a collector, which enriches with k8s metadata, applies
+the tail-sampling / namespace routing / log-tenant labels, and writes to
+the design's native stores (Tempo, LokiStack, Prometheus/UWM). RBAC is at
+those stores (Tempo tenants, Loki tenants, namespace labels on metrics).
+
 ## Prerequisites
 
 - An OpenShift cluster + a **cluster-admin** kubeconfig
