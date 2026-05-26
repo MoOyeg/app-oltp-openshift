@@ -1,4 +1,4 @@
-# Collecting all three OpenShift observability signals with the Red Hat build of OpenTelemetry
+# One collection layer, four signal types, and a Datadog fan-out to prove it
 
 OpenTelemetry has become the default vendor-neutral standard for
 collecting telemetry. It's CNCF-graduated, supported by every major
