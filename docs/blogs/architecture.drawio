@@ -1,0 +1,127 @@
+<mxfile host="65bd71144e">
+    <diagram name="Architecture" id="arch1">
+        <mxGraphModel dx="526" dy="827" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" background="#FFFFFF" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="ocp" value="OpenShift cluster" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=8;spacingLeft=12;fontSize=14;fontStyle=1;fillColor=none;strokeColor=#0066cc;strokeWidth=2;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="20" width="950" height="540" as="geometry"/>
+                </mxCell>
+                <mxCell id="quarkus" value="Quarkus app&#xa;(otel-demo-quarkus)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0066cc;strokeWidth=2;fontColor=#3c3c3c;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="70" width="220" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="python" value="Python app&#xa;(otel-demo-python)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0066cc;strokeWidth=2;fontColor=#3c3c3c;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="130" width="220" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="netobserv" value="NetObserv FlowCollector&#xa;(eBPF + flowlogs-pipeline)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0066cc;strokeWidth=2;fontColor=#3c3c3c;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="210" width="220" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="platform" value="Platform sources&#xa;(stdout, audit, hostmetrics, kubeletstats)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0066cc;strokeWidth=2;fontColor=#3c3c3c;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="340" width="220" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="gateway" value="Gateway collector (Deployment)&#xa;&#xa;OTLP :4317 (apps)&#xa;OTLP :4319 (netobserv)&#xa;k8sattributes • routing&#xa;tail_sampling • per-tenant pipelines" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0066cc;strokeWidth=2;fontColor=#3c3c3c;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="320" y="90" width="240" height="190" as="geometry"/>
+                </mxCell>
+                <mxCell id="nodeds" value="Node collector (DaemonSet)&#xa;&#xa;filelog × 3 tenants&#xa;hostmetrics&#xa;kubeletstats" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0066cc;strokeWidth=2;fontColor=#3c3c3c;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="320" y="330" width="240" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="tempo" value="TempoStack (per-tenant)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=4;spacingLeft=8;fontSize=12;fontStyle=1;fillColor=#deebff;strokeColor=#0066cc;strokeWidth=1;" parent="1" vertex="1">
+                    <mxGeometry x="620" y="60" width="320" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_quarkus" value="tenant: Quarkus" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="95" width="280" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="t_python" value="tenant: Python" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="140" width="280" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="loki" value="LokiStack (multi-tenant)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=4;spacingLeft=8;fontSize=12;fontStyle=1;fillColor=#deebff;strokeColor=#0066cc;strokeWidth=1;" parent="1" vertex="1">
+                    <mxGeometry x="620" y="220" width="320" height="220" as="geometry"/>
+                </mxCell>
+                <mxCell id="l_app" value="tenant: application" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="255" width="280" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="l_infra" value="tenant: infrastructure" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="300" width="280" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="l_audit" value="tenant: audit" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="345" width="280" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="l_net" value="tenant: network" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="390" width="280" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="uwm" value="UWM Prometheus" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="620" y="470" width="320" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="dd_group" value="Optional: External Otel Receiver(e.g Datadog)— outside cluster" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingTop=4;spacingLeft=8;fontSize=12;fontStyle=1;fillColor=#e5e5e5;strokeColor=#707070;strokeWidth=1;dashed=1;" parent="1" vertex="1">
+                    <mxGeometry x="620" y="580" width="320" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="datadog" value="Datadog&#xa;(logs, metrics, traces, APM)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0066cc;strokeColor=none;fontColor=#ffffff;fontStyle=1;align=center;verticalAlign=middle;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="615" width="280" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.2;entryDx=0;entryDy=0;" parent="1" source="quarkus" target="gateway" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.35;entryDx=0;entryDy=0;" parent="1" source="python" target="gateway" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e3" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0;" parent="1" source="netobserv" target="gateway" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e4" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="platform" target="nodeds" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e5" value="route: Quarkus" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.2;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="gateway" target="t_quarkus" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e6" value="route: Python" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="gateway" target="t_python" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e7" value="netobserv flow logs" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.9;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="gateway" target="l_net" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e8" value="prom scrape (app + netobserv metrics)" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.85;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="gateway" target="uwm" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="585" y="252"/>
+                            <mxPoint x="585" y="455"/>
+                            <mxPoint x="700" y="455"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e9" value="filelog: application" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.2;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="nodeds" target="l_app" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e10" value="filelog: infrastructure" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.4;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="nodeds" target="l_infra" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e11" value="filelog: audit" style="endArrow=classic;html=1;strokeColor=#151515;exitX=1;exitY=0.6;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="nodeds" target="l_audit" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e12" value="prom scrape (host + kubelet metrics)" style="endArrow=classic;html=1;strokeColor=#151515;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;fontSize=10;" parent="1" source="nodeds" target="uwm" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="440" y="455"/>
+                            <mxPoint x="860" y="455"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e13" style="endArrow=classic;html=1;dashed=1;strokeColor=#707070;exitX=1;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="gateway" target="datadog" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="605" y="280"/>
+                            <mxPoint x="605" y="645"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e14" style="endArrow=classic;html=1;dashed=1;strokeColor=#707070;exitX=0.7;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="nodeds" target="datadog" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="488" y="555"/>
+                            <mxPoint x="780" y="555"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
