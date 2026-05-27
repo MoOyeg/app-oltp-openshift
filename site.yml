@@ -28,6 +28,7 @@
     - { role: loki,               tags: ['netobserv', 'loki'], when: netobserv_enabled | bool }
     - { role: netobserv,          tags: ['netobserv'], when: netobserv_enabled | bool }
     - { role: platform_loki,      tags: ['platform', 'logs'], when: platform_telemetry_enabled | bool }
+    - { role: datadog,            tags: ['datadog'], when: datadog_enabled | bool }
     - { role: otel_gateway,       tags: ['otel', 'gateway'] }
     - { role: otel_node,          tags: ['otel', 'daemonset', 'platform'], when: otel_daemonset_enabled | bool }
     - { role: instrumentation,    tags: ['otel', 'instrumentation'] }

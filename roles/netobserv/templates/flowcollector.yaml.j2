@@ -35,3 +35,32 @@ spec:
     enable: true
     advanced:
       register: true
+{% if (datadog_enabled | default(false) | bool) and (netobserv_datadog_enabled | default(true) | bool) %}
+  # NetObserv auto-generates a NetworkPolicy that locks flowlogs-pipeline
+  # egress to same-ns + openshift-{dns,monitoring,*-apiserver}. The gateway
+  # collector lives in the observability namespace, so without this entry
+  # the OTLP push to gateway-collector:{{ netobserv_otlp_port }} times out
+  # on every dial.
+  networkPolicy:
+    enable: true
+    additionalNamespaces:
+      - {{ observability_namespace }}
+  # Datadog fan-out for enriched flows. flowlogs-pipeline pushes OTLP/gRPC
+  # to the OTel gateway's dedicated otlp/netobserv receiver (port
+  # netobserv_otlp_port, cross-namespace observability/). The gateway has
+  # logs/netobserv + metrics/netobserv pipelines that export to the
+  # datadog exporter only - the FlowCollector's native LokiStack +
+  # in-cluster Prometheus paths above are unchanged. Plaintext gRPC
+  # in-cluster: no tls block (matches the gateway's otlp receiver, which
+  # does not terminate TLS for the demo).
+  exporters:
+    - type: OpenTelemetry
+      openTelemetry:
+        targetHost: "{{ otel_gateway_name }}-collector.{{ observability_namespace }}.svc.cluster.local"
+        targetPort: {{ netobserv_otlp_port }}
+        protocol: grpc
+        logs:
+          enable: true
+        metrics:
+          enable: true
+{% endif %}

@@ -13,6 +13,12 @@ metadata:
   namespace: {{ observability_namespace }}
 spec:
   mode: deployment
+{% if datadog_enabled | default(false) %}
+  # Datadog fan-out (datadog_enabled=true) requires the `datadog` exporter,
+  # which is NOT in the Red Hat build of OpenTelemetry Collector. Swap to
+  # upstream contrib for both Tempo and Datadog egress.
+  image: "{{ datadog_collector_image }}"
+{% endif %}
   replicas: {{ otel_gateway_replicas }}
   serviceAccount: {{ otel_gateway_name }}-collector
   # Expose the prometheus exporter port on the operator-managed Service so
@@ -21,8 +27,25 @@ spec:
     - name: promexporter
       port: {{ otel_gateway_metrics_port }}
       protocol: TCP
+{% if (netobserv_enabled | default(false) | bool) and (datadog_enabled | default(false) | bool) and (netobserv_datadog_enabled | default(true) | bool) %}
+    # Dedicated OTLP/gRPC receiver for NetObserv enriched flows. Off 4317
+    # so the operator-managed Service exposes it as its own port and the
+    # gateway can keep app traces/metrics on completely separate pipelines.
+    - name: otlp-netobserv
+      port: {{ netobserv_otlp_port }}
+      protocol: TCP
+      targetPort: {{ netobserv_otlp_port }}
+{% endif %}
   resources:
 {{ otel_gateway_resources | to_nice_yaml(indent=2) | indent(4, true) }}
+{% if datadog_enabled | default(false) %}
+  env:
+    - name: DD_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{ datadog_secret_name }}
+          key: DD_API_KEY
+{% endif %}
   config:
     receivers:
       otlp:
@@ -31,6 +54,30 @@ spec:
             endpoint: 0.0.0.0:4317
           http:
             endpoint: 0.0.0.0:4318
+{% if datadog_enabled | default(false) %}
+      # Self-scrape: each pod scrapes its own collector-internal metrics
+      # endpoint (otelcol_*) so Datadog's "OpenTelemetry Collector" dashboard
+      # can show throughput/queue/dropped-spans per pod.
+      prometheus/self:
+        config:
+          scrape_configs:
+            - job_name: 'otel-collector'
+              scrape_interval: 10s
+              static_configs:
+                - targets: ['0.0.0.0:8888']
+{% endif %}
+{% if (netobserv_enabled | default(false) | bool) and (datadog_enabled | default(false) | bool) and (netobserv_datadog_enabled | default(true) | bool) %}
+      # NetObserv enriched-flow ingress. NetObserv's flowlogs-pipeline
+      # writes to FlowCollector.spec.exporters[].openTelemetry, which
+      # speaks OTLP/gRPC. A dedicated receiver instance keeps flow logs
+      # and flow metrics on isolated pipelines that ONLY fan out to
+      # Datadog (the native LokiStack + in-cluster Prometheus paths are
+      # still handled by FlowCollector directly).
+      otlp/netobserv:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:{{ netobserv_otlp_port }}
+{% endif %}
 
     processors:
       # Backpressure guard so the gateway sheds load instead of OOM-killing.
@@ -65,6 +112,15 @@ spec:
           - key: deployment.environment.name
             value: "{{ otel_environment_name }}"
             action: upsert
+{% if datadog_enabled | default(false) %}
+      # Host/cloud detection so Datadog's host correlation has host.name,
+      # host.id, os.*, cloud.*. override=false so SDK/k8sattributes-supplied
+      # attributes win. Detectors that don't apply (wrong cloud) no-op.
+      resourcedetection:
+        detectors: {{ datadog_resource_detectors | default(['env', 'system', 'openshift']) | to_json }}
+        timeout: 2s
+        override: false
+{% endif %}
 
       # ---- Tail sampling (design.md sec 3.3 / 4.1) ----
       # Composite OR: a trace is kept if ANY policy matches. Keep every error
@@ -114,6 +170,14 @@ spec:
             condition: attributes["service.namespace"] == "{{ t.namespace }}" or attributes["k8s.namespace.name"] == "{{ t.namespace }}"
             pipelines: [traces/{{ t.name }}]
 {% endfor %}
+{% if datadog_enabled | default(false) %}
+      # Datadog APM trace metrics: pre-compute service-level rollups (request
+      # rate, error rate, latency histograms) from spans inside the collector
+      # so Datadog's APM UI gets proper metric series instead of having to
+      # back-compute them from raw spans. Appears as an exporter on each
+      # traces/<tenant> pipeline and as a receiver on the metrics pipeline.
+      datadog/connector: {}
+{% endif %}
 
     exporters:
       # design.md sec 3.3 "export to Tempo": OTLP into the multitenant Tempo
@@ -141,6 +205,15 @@ spec:
         resource_to_telemetry_conversion:
           enabled: true
         enable_open_metrics: true
+{% if datadog_enabled | default(false) %}
+      # Datadog fan-out (datadog_enabled=true). Single exporter handles both
+      # traces and metrics; the same exporter is appended to the per-tenant
+      # trace pipelines and the metrics pipeline below.
+      datadog:
+        api:
+          site: "{{ datadog_site }}"
+          key: "${env:DD_API_KEY}"
+{% endif %}
       debug:
         verbosity: basic
 
@@ -151,18 +224,38 @@ spec:
         # tail-sample independently and export to their tenant.
         traces/in:
           receivers: [otlp]
-          processors: [memory_limiter, k8sattributes, resource]
+          processors: [memory_limiter, k8sattributes, resource{% if datadog_enabled | default(false) %}, resourcedetection{% endif %}]
           exporters: [routing]
 {% for t in tempo_tenants %}
         traces/{{ t.name }}:
           receivers: [routing]
           processors: [tail_sampling, batch]
-          exporters: [otlp/{{ t.name }}, debug]
+          exporters: [otlp/{{ t.name }}, debug{% if datadog_enabled | default(false) %}, datadog, datadog/connector{% endif %}]
 {% endfor %}
         # App metrics: enrich (same k8s/service attrs as traces) then
         # expose for UWM scrape. NOT tenant-routed - metrics live in
-        # Prometheus/UWM, not Tempo (design.md sec 2 taxonomy).
+        # Prometheus/UWM, not Tempo (design.md sec 2 taxonomy). When
+        # datadog_enabled, also receive APM trace metrics from the
+        # datadog/connector and the collector's own self-metrics
+        # (prometheus/self -> otelcol_* series) so the Datadog "OpenTelemetry
+        # Collector" dashboard works.
         metrics:
-          receivers: [otlp]
-          processors: [memory_limiter, k8sattributes, resource, batch]
-          exporters: [prometheus]
+          receivers: [otlp{% if datadog_enabled | default(false) %}, prometheus/self, datadog/connector{% endif %}]
+          processors: [memory_limiter, k8sattributes, resource{% if datadog_enabled | default(false) %}, resourcedetection{% endif %}, batch]
+          exporters: [prometheus{% if datadog_enabled | default(false) %}, datadog{% endif %}]
+{% if (netobserv_enabled | default(false) | bool) and (datadog_enabled | default(false) | bool) and (netobserv_datadog_enabled | default(true) | bool) %}
+        # NetObserv enriched-flow fan-out (logs + metrics). Receives only
+        # from otlp/netobserv so it does not duplicate or interleave with
+        # the application metrics pipeline above. k8sattributes is skipped
+        # because NetObserv already enriches flows with k8s.* attributes
+        # in flowlogs-pipeline; resourcedetection still applies for
+        # consistent host/cloud tagging in the Datadog UI.
+        logs/netobserv:
+          receivers: [otlp/netobserv]
+          processors: [memory_limiter, resource, resourcedetection, batch]
+          exporters: [datadog, debug]
+        metrics/netobserv:
+          receivers: [otlp/netobserv]
+          processors: [memory_limiter, resource, resourcedetection, batch]
+          exporters: [datadog, debug]
+{% endif %}

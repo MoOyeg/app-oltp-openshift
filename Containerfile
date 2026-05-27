@@ -15,7 +15,9 @@ RUN curl -sSL \
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
- && ansible-galaxy collection install kubernetes.core community.general
+ && ansible-galaxy collection install kubernetes.core community.general \
+ && chown -R 1001:0 /opt/app-root/src/.ansible \
+ && chmod -R g+rwX /opt/app-root/src/.ansible
 
 USER 1001
 WORKDIR /work

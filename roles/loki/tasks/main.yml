@@ -88,7 +88,7 @@
   retries: 50
   delay: 15
   until: >
-    _lks.resources | length > 0 and
-    (_lks.resources[0].status.conditions | default([])
+    (_lks.resources | default([])) | length > 0 and
+    ((_lks.resources | default([]))[0].status.conditions | default([])
       | selectattr('type','equalto','Ready')
       | selectattr('status','equalto','True') | list | length) > 0

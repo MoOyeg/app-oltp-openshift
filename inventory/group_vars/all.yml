@@ -82,6 +82,18 @@ netobserv_slice_sampling: 50
 # 1x.demo defaults are tiny; raise so flows are not rate-limited.
 netobserv_loki_ingestion_mb: 25
 netobserv_loki_ingestion_burst_mb: 35
+# Fan out enriched flows (logs + metrics, no traces) to the gateway
+# collector's dedicated OTLP receiver on port 4319 when datadog_enabled is
+# also true. Gated separately so a cluster can run app-side Datadog fan-out
+# without sending high-volume flow records to Datadog (cost knob). The
+# native FlowCollector path to LokiStack + in-cluster Prometheus is
+# unchanged - this is purely additive.
+netobserv_datadog_enabled: true
+# Port the gateway collector exposes for the dedicated NetObserv OTLP
+# receiver. Kept off 4317 so application OTLP traffic and NetObserv flows
+# stay on separate pipelines and cannot cross-contaminate the app metrics
+# pipeline (which exports to UWM).
+netobserv_otlp_port: 4319
 
 # ---- TempoStack (design.md sec 3.4) -----------------------------------------
 tempo_name: "demo"
@@ -158,10 +170,15 @@ otel_node_metrics_port: 8889
 # Console Logs view schema. One log source (OTel DaemonSet via OTLP);
 # this is only the plugin's LogQL query TEMPLATE. The stored stream
 # labels are OTEL-style (k8s_namespace_name, log_type), so "otel" is the
-# correct schema - it generates k8s_namespace_name for namespace filters.
-# "viaq" only appeared to work because log_type (tenant) is the one label
-# both schemas share; viaq's kubernetes_namespace_name does not exist here.
-platform_logs_ui_schema: "otel"
+# theoretically-correct schema. In practice, on COO 1.4 + Loki OTLP the
+# console plugin's default no-filter query under "otel" returns 0 results
+# even when {log_type="<tenant>"} returns data via direct LokiStack
+# query. "viaq" works because its tenant query uses log_type, which is a
+# stream label both schemas share. Namespace filters built from the
+# Logs UI in "viaq" mode generate kubernetes_namespace_name which does
+# NOT exist here - so filter by k8s_namespace_name in the Search box
+# instead. Revisit when COO ships an otel-schema fix.
+platform_logs_ui_schema: "viaq"
 
 # ---- Gateway collector: Deployment mode (design.md sec 3.3) -----------------
 # THE trace path. Workload SDKs -> here -> tail-sampling + enrichment -> Tempo.
@@ -247,3 +264,31 @@ uwm_enabled: true
 loadgen_enabled: true
 loadgen_image: "registry.access.redhat.com/ubi9/ubi-minimal:latest"
 loadgen_interval_s: 5
+
+# ---- Datadog fan-out (optional; out-of-scope per design.md but supported) ---
+# When datadog_enabled, the gateway collector also exports traces+metrics to
+# Datadog, and the DaemonSet collector also exports app/infra/audit logs (and
+# host/kubelet metrics) to Datadog. Because the Red Hat build of the
+# OpenTelemetry Collector does not ship the `datadog` exporter, both
+# collectors are switched to the upstream contrib image when enabled.
+#
+# datadog_api_key MUST be supplied at runtime - never commit it. Pass via:
+#   ./ansible-runner.sh deploy -e datadog_enabled=true -e datadog_api_key=<key>
+# or export DATADOG_API_KEY=<key> and the runner wrapper plumbs it through.
+# datadog_api_key_id is informational only (the UUID shown in the Datadog UI
+# next to the key); auth is the key value itself.
+datadog_enabled: false
+datadog_site: "us5.datadoghq.com"
+datadog_secret_name: "datadog-api-key"
+datadog_collector_image: "docker.io/otel/opentelemetry-collector-contrib:0.120.0"
+# Datadog recommends 10s hostmetrics collection_interval; UWM is fine with
+# the slower otel_node_hostmetrics_interval_s default (30s) when DD is off.
+datadog_hostmetrics_interval_s: 10
+# resourcedetection detectors injected on both collectors when datadog_enabled.
+# Defaults are portable; override per cluster for cloud-specific attributes:
+#   AWS:   ['env', 'system', 'ec2', 'eks', 'openshift']
+#   GCP:   ['env', 'system', 'gcp', 'openshift']
+#   Azure: ['env', 'system', 'azure', 'openshift']
+datadog_resource_detectors: ['env', 'system', 'openshift']
+# datadog_api_key:    "<provide at runtime via -e or DATADOG_API_KEY env>"
+# datadog_api_key_id: "<UUID from the Datadog UI, informational only>"

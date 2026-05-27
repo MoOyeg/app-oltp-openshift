@@ -1,0 +1,35 @@
+---
+# The OpenTelemetry resourcedetection processor's `openshift` detector calls
+# GET infrastructures.config.openshift.io/cluster to read cloud.provider /
+# cluster name. Both the gateway-collector and node-collector SAs need this
+# (cluster-scoped, read-only). Created only when datadog_enabled.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-resourcedetection-openshift
+  labels:
+    app.kubernetes.io/managed-by: app-oltp-openshift
+    app.kubernetes.io/component: datadog-fanout
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["infrastructures", "infrastructures/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-resourcedetection-openshift
+  labels:
+    app.kubernetes.io/managed-by: app-oltp-openshift
+    app.kubernetes.io/component: datadog-fanout
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-resourcedetection-openshift
+subjects:
+  - kind: ServiceAccount
+    name: {{ otel_gateway_name }}-collector
+    namespace: {{ observability_namespace }}
+  - kind: ServiceAccount
+    name: {{ otel_node_name }}-collector
+    namespace: {{ observability_namespace }}

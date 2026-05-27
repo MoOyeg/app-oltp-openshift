@@ -46,6 +46,14 @@ echo ">> Building runner image ($IMAGE_NAME) with $ENGINE ..."
 "$ENGINE" build -t "$IMAGE_NAME" -f "$REPO_DIR/Containerfile" "$REPO_DIR"
 
 echo ">> Running $PLAYBOOK $* ..."
+# Optional Datadog fan-out: if DATADOG_API_KEY is in the host env, plumb it
+# through as an extra-var so the datadog role can create the Secret. Never
+# echo the key. The user can also pass `-e datadog_api_key=...` explicitly.
+DD_EXTRA=()
+if [[ -n "${DATADOG_API_KEY:-}" ]]; then
+  DD_EXTRA+=(-e "datadog_enabled=true" -e "datadog_api_key=${DATADOG_API_KEY}")
+fi
+
 exec "$ENGINE" run --rm -it \
   --userns=keep-id \
   -v "$REPO_DIR":/work:Z \
@@ -54,4 +62,4 @@ exec "$ENGINE" run --rm -it \
   -e ANSIBLE_CONFIG=/work/ansible.cfg \
   -w /work \
   "$IMAGE_NAME" \
-  ansible-playbook -i inventory/hosts "$PLAYBOOK" "$@"
+  ansible-playbook -i inventory/hosts "$PLAYBOOK" "${DD_EXTRA[@]}" "$@"

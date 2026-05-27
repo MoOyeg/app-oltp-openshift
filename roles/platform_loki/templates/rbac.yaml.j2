@@ -58,6 +58,26 @@ subjects:
   - kind: Group
     apiGroup: rbac.authorization.k8s.io
     name: {{ platform_logs_admin_group }}
+{% for t in platform_log_tenants %}
+---
+# The LokiStack gateway (Observatorium API) enforces tenant-level authz
+# via SubjectAccessReview against the operator-managed ClusterRole
+# `cluster-logging-{{ t }}-view`. Our own `platform-logs-admin-reader`
+# alone is NOT enough - without this binding, the COO Logs UIPlugin's
+# queries return "No datapoints found" even when data is in LokiStack.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-logs-{{ t }}-view-admins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-logging-{{ t }}-view
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ platform_logs_admin_group }}
+{% endfor %}
 {% if 'application' in platform_log_tenants %}
 ---
 # Per-team APPLICATION log reader. Namespace-scoped RoleBindings (not the

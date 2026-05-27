@@ -16,6 +16,12 @@ metadata:
   namespace: {{ observability_namespace }}
 spec:
   mode: daemonset
+{% if datadog_enabled | default(false) %}
+  # Datadog logs fan-out requires the `datadog` exporter (not in the Red Hat
+  # build). Swap to upstream contrib; all other components used here
+  # (hostmetrics, kubeletstats, filelog, otlphttp) exist in contrib too.
+  image: "{{ datadog_collector_image }}"
+{% endif %}
   serviceAccount: {{ otel_node_name }}-collector
   # NOT hostNetwork: it forced the :8889 exporter onto node IPs, which UWM
   # could not scrape (context-deadline-exceeded). hostmetrics uses /hostfs,
@@ -45,6 +51,13 @@ spec:
       valueFrom:
         fieldRef:
           fieldPath: spec.nodeName
+{% if datadog_enabled | default(false) %}
+    - name: DD_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{ datadog_secret_name }}
+          key: DD_API_KEY
+{% endif %}
   volumes:
     - name: hostfs
       hostPath:
@@ -56,8 +69,22 @@ spec:
       mountPropagation: HostToContainer
   config:
     receivers:
+{% if datadog_enabled | default(false) %}
+      # Self-scrape: each DaemonSet pod scrapes its own collector-internal
+      # metrics endpoint (otelcol_*) so Datadog's "OpenTelemetry Collector"
+      # dashboard can show throughput / dropped data per node.
+      prometheus/self:
+        config:
+          scrape_configs:
+            - job_name: 'otel-collector-node'
+              scrape_interval: 10s
+              static_configs:
+                - targets: ['0.0.0.0:8888']
+{% endif %}
+      # Datadog recommends 10s collection_interval for infrastructure
+      # metrics; with UWM the default is the slower otel_node_hostmetrics_interval_s.
       hostmetrics:
-        collection_interval: {{ otel_node_hostmetrics_interval_s }}s
+        collection_interval: {{ (datadog_hostmetrics_interval_s | default(10)) if (datadog_enabled | default(false)) else otel_node_hostmetrics_interval_s }}s
         root_path: /hostfs
         scrapers:
           cpu: {}
@@ -120,6 +147,15 @@ spec:
           - key: deployment.environment.name
             value: "{{ otel_environment_name }}"
             action: upsert
+{% if datadog_enabled | default(false) %}
+      # Host/cloud detection so Datadog host correlation has host.name,
+      # host.id, os.*, cloud.*. override=false so anything the resource
+      # processor already set (k8s.node.name, deployment.environment.name) wins.
+      resourcedetection:
+        detectors: {{ datadog_resource_detectors | default(['env', 'system', 'openshift']) | to_json }}
+        timeout: 2s
+        override: false
+{% endif %}
       batch: {}
 {% if platform_telemetry_enabled %}
       # LokiStack OTLP ingest requires >=1 stream label. Infra logs get
@@ -153,6 +189,14 @@ spec:
         endpoint: 0.0.0.0:{{ otel_node_metrics_port | default(8889) }}
         resource_to_telemetry_conversion:
           enabled: true
+{% if datadog_enabled | default(false) %}
+      # Datadog fan-out for logs (and host/kubelet metrics if you want them
+      # in Datadog too — appended to the metrics pipeline below).
+      datadog:
+        api:
+          site: "{{ datadog_site }}"
+          key: "${env:DD_API_KEY}"
+{% endif %}
       debug:
         verbosity: basic
 {% if platform_telemetry_enabled %}
@@ -172,24 +216,24 @@ spec:
 {% endif %}
       pipelines:
         metrics:
-          receivers: [hostmetrics{% if platform_telemetry_enabled %}, kubeletstats{% endif %}]
-          processors: [resource, batch]
-          exporters: [prometheus]
+          receivers: [hostmetrics{% if platform_telemetry_enabled %}, kubeletstats{% endif %}{% if datadog_enabled | default(false) %}, prometheus/self{% endif %}]
+          processors: [resource{% if datadog_enabled | default(false) %}, resourcedetection{% endif %}, batch]
+          exporters: [prometheus{% if datadog_enabled | default(false) %}, datadog{% endif %}]
 {% if platform_telemetry_enabled %}
         logs/infrastructure:
           receivers: [filelog/infra]
-          processors: [resource, resource/infra, batch]
-          exporters: [otlphttp/infrastructure]
+          processors: [resource{% if datadog_enabled | default(false) %}, resourcedetection{% endif %}, resource/infra, batch]
+          exporters: [otlphttp/infrastructure{% if datadog_enabled | default(false) %}, datadog{% endif %}]
 {% if 'application' in platform_log_tenants %}
         logs/application:
           receivers: [filelog/app]
-          processors: [resource, resource/app, batch]
-          exporters: [otlphttp/application]
+          processors: [resource{% if datadog_enabled | default(false) %}, resourcedetection{% endif %}, resource/app, batch]
+          exporters: [otlphttp/application{% if datadog_enabled | default(false) %}, datadog{% endif %}]
 {% endif %}
 {% if 'audit' in platform_log_tenants %}
         logs/audit:
           receivers: [filelog/audit]
-          processors: [resource, resource/audit, batch]
-          exporters: [otlphttp/audit]
+          processors: [resource{% if datadog_enabled | default(false) %}, resourcedetection{% endif %}, resource/audit, batch]
+          exporters: [otlphttp/audit{% if datadog_enabled | default(false) %}, datadog{% endif %}]
 {% endif %}
 {% endif %}

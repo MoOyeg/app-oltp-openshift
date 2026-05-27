@@ -1,0 +1,41 @@
+---
+# datadog: fan-out to Datadog from the OTel gateway (traces, metrics) and
+# the OTel DaemonSet (logs). Creates the Secret that the operator-managed
+# collectors read DD_API_KEY from at runtime. The exporter itself is added
+# to the collector configs (otel_gateway / otel_node) when datadog_enabled,
+# which also flips those collectors to the upstream `contrib` image because
+# the Red Hat build of OpenTelemetry Collector does not ship the `datadog`
+# exporter.
+
+- name: Validate datadog_api_key is provided
+  ansible.builtin.assert:
+    that:
+      - datadog_api_key is defined
+      - datadog_api_key | length > 0
+    fail_msg: >-
+      datadog_enabled=true requires datadog_api_key. Pass it at runtime,
+      never in a tracked file:
+        ./ansible-runner.sh deploy -e datadog_api_key=<key>
+      (or export DATADOG_API_KEY=... and re-run the wrapper).
+
+- name: Create the Datadog API-key Secret in the observability namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ datadog_secret_name }}"
+        namespace: "{{ observability_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: app-oltp-openshift
+          app.kubernetes.io/component: datadog-fanout
+      type: Opaque
+      stringData:
+        DD_API_KEY: "{{ datadog_api_key }}"
+
+- name: Grant the openshift resourcedetection RBAC to both collector SAs
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'resourcedetection-openshift-rbac.yaml.j2') | from_yaml_all | list }}"
+  when: "'openshift' in (datadog_resource_detectors | default(['env', 'system', 'openshift']))"
